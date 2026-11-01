@@ -66,6 +66,11 @@ impl ObsManager {
     }
 
     async fn run_once(&self, report: &impl Fn(String)) -> Result<()> {
+        if cfg!(windows) && !self.paths.exe.exists() {
+            bail!("OBS not found. Unpack the OBS Studio zip (Windows x64) into {}",
+                  self.paths.exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+                      .unwrap_or(&self.paths.exe).display());
+        }
         config::write_all(&self.paths, &self.settings, &self.incoming, &self.password)?;
         #[cfg(not(windows))]
         setup::ensure_dev_media(&self.data_dir)?;
