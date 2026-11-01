@@ -21,10 +21,14 @@ pub async fn run(app: AppHandle) {
     loop {
         tokio::time::sleep(TICK).await;
         let d = det.take().unwrap();
-        let disabled = app.state::<AppState>().user.lock().await.disabled_games.clone();
+        let (disabled, custom) = {
+            let u = app.state::<AppState>();
+            let u = u.user.lock().await;
+            (u.disabled_games.clone(), u.custom_games.clone())
+        };
         let Ok((d, found)) = tokio::task::spawn_blocking(move || {
             let mut d = d;
-            let g = d.detect(&disabled);
+            let g = d.detect(&disabled, &custom);
             (d, g)
         })
         .await
@@ -108,6 +112,9 @@ pub async fn run(app: AppHandle) {
         }
 
         if !buffer && !st.user_stopped.load(Ordering::SeqCst) {
+            if !crate::modes::game_started(&app).await {
+                continue; // a screen recording is running: leave it alone
+            }
             match st.obs.client.call("StartReplayBuffer", json!({})).await {
                 Ok(_) => {
                     auto_started = true;

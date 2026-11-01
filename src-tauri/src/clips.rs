@@ -15,6 +15,8 @@ pub struct ClipInfo {
     pub size: u64,
     /// Seconds since epoch.
     pub modified: u64,
+    /// Game folder the clip lives in ("" = directly in the clips folder).
+    pub folder: String,
 }
 
 /// Characters Windows forbids in file names.
@@ -28,12 +30,14 @@ fn sanitize(s: &str) -> String {
     if trimmed.is_empty() { "Clip".into() } else { trimmed }
 }
 
-/// Move a replay from OBS's incoming folder into the clips folder as
-/// "<Game> YYYY-MM-DD HH-MM-SS.mp4".
+/// Move a replay from OBS's incoming folder into the game's own folder:
+/// "<clips>/<Game>/<Game> YYYY-MM-DD HH-MM-SS.mp4".
 pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf> {
+    let name = sanitize(game.unwrap_or("Clip"));
+    let clips_dir = &clips_dir.join(&name);
     fs::create_dir_all(clips_dir)?;
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-    let base = format!("{} {stamp}", sanitize(game.unwrap_or("Clip")));
+    let base = format!("{name} {stamp}");
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
     let mut dst = clips_dir.join(format!("{base}.{ext}"));
     let mut n = 2;
@@ -49,15 +53,15 @@ pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf
     Ok(dst)
 }
 
-pub fn list(clips_dir: &Path) -> Vec<ClipInfo> {
-    let mut out: Vec<ClipInfo> = fs::read_dir(clips_dir)
+fn videos_in(dir: &Path, folder: &str) -> Vec<ClipInfo> {
+    fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let p = e.path();
             let ext = p.extension()?.to_str()?.to_ascii_lowercase();
-            if !matches!(ext.as_str(), "mp4" | "mkv" | "mov") {
+            if !matches!(ext.as_str(), "mp4" | "mkv" | "mov") || p.to_string_lossy().ends_with(".part.mp4") {
                 return None;
             }
             let md = e.metadata().ok()?;
@@ -66,18 +70,52 @@ pub fn list(clips_dir: &Path) -> Vec<ClipInfo> {
                 path: p.to_string_lossy().into_owned(),
                 size: md.len(),
                 modified: md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs(),
+                folder: folder.to_string(),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// All clips: directly in the clips folder and one level of game folders.
+pub fn list(clips_dir: &Path) -> Vec<ClipInfo> {
+    let mut out = videos_in(clips_dir, "");
+    for e in fs::read_dir(clips_dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            let folder = e.file_name().to_string_lossy().into_owned();
+            if !folder.starts_with('.') {
+                out.extend(videos_in(&p, &folder));
+            }
+        }
+    }
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out
+}
+
+/// One-time tidy-up: clips saved before game folders existed move into the
+/// folder of their game ("<Game> 2026-11-01 14-17-58.mp4" → "<Game>/").
+pub fn sort_into_folders(clips_dir: &Path) {
+    for c in videos_in(clips_dir, "") {
+        let game = crate::editor::base_name(&c.name);
+        let dir = clips_dir.join(sanitize(&game));
+        let src = PathBuf::from(&c.path);
+        let Some(fname) = src.file_name() else { continue };
+        let dst = dir.join(fname);
+        if dst.exists() || fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        if fs::rename(&src, &dst).is_ok() {
+            crate::clog!("moved {} into {}", c.name, dir.display());
+        }
+    }
 }
 
 /// A clip path from the UI, only if it really is a file inside the clips folder.
 pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
     let dir = fs::canonicalize(clips_dir).map_err(|e| e.to_string())?;
     let p = fs::canonicalize(path).map_err(|_| "That clip no longer exists".to_string())?;
-    if p.parent() != Some(dir.as_path()) || !p.is_file() {
+    let inside = p.parent() == Some(dir.as_path()) || p.parent().and_then(|d| d.parent()) == Some(dir.as_path());
+    if !inside || !p.is_file() {
         return Err("Not a clip in the clips folder".into());
     }
     Ok(p)

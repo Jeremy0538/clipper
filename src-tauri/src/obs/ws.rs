@@ -16,8 +16,8 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Event subscriptions: General (1) | Outputs (64).
-const EVENT_SUBS: u64 = 1 | 64;
+/// Event subscriptions: General (1) | Outputs (64) | InputVolumeMeters (65536).
+const EVENT_SUBS: u64 = 1 | 64 | 65536;
 
 /// Pseudo event sent on our own broadcast channel when the socket closes.
 pub const DISCONNECTED: &str = "_Disconnected";

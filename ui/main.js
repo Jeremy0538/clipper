@@ -15,7 +15,8 @@ for (const tab of document.querySelectorAll(".tab")) {
     if (ed.info) closeEditor();
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + tab.dataset.view));
-    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); }
+    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); loadMonitors(); }
+    meters(tab.dataset.view === "settings");
   };
 }
 
@@ -31,15 +32,20 @@ function render() {
   $("game").title = status.game || "No game";
   $("game").textContent = status.game || "No game";
   $("game").classList.toggle("on", !!status.game);
-  $("buffer").textContent = "Buffer: " + (status.buffer ? "recording" : "off");
+  $("buffer").textContent = "Clipping: " + (status.buffer ? "on" : "off");
   $("buffer").classList.toggle("on", status.buffer);
-  $("toggle").textContent = status.buffer ? "Stop buffer" : "Start buffer";
+  $("toggle").textContent = status.buffer ? "Stop clipping" : "Start clipping";
   $("toggle").disabled = !ready;
+  $("record").textContent = status.recording ? "■ Stop recording" : "● Record";
+  $("record").classList.toggle("rec", !!status.recording);
+  $("record").disabled = !ready;
   $("save").disabled = !status.buffer;
+  if (status.screen && !status.game) { $("game").textContent = "Screen"; $("game").classList.add("on"); }
   if (ready && !devicesLoaded) loadDevices();
 }
 
 $("toggle").onclick = () => invoke(status.buffer ? "stop_buffer" : "start_buffer").catch(say);
+$("record").onclick = () => invoke("toggle_recording").catch(say);
 $("save").onclick = () => invoke("save_clip").catch(say);
 
 // ---------- clips ----------
@@ -109,8 +115,20 @@ function clipCard(c) {
   return el;
 }
 
+let folderFilter = "";
 async function loadClips() {
-  const clips = await invoke("list_clips");
+  const all = await invoke("list_clips");
+  const folders = [...new Set(all.map((c) => c.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  if (folderFilter && !folders.includes(folderFilter)) folderFilter = "";
+  $("folders").replaceChildren(...["", ...folders].map((f) => {
+    const b = document.createElement("button");
+    b.textContent = f || "All";
+    b.classList.toggle("active", f === folderFilter);
+    b.onclick = () => { folderFilter = f; loadClips(); };
+    return b;
+  }));
+  $("folders").classList.toggle("hidden", folders.length < 2);
+  const clips = folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
   $("clips").replaceChildren(...clips.map(clipCard));
   const gb = clips.reduce((n, c) => n + c.size, 0) / 1e9;
   $("clip-count").textContent = clips.length ? `${clips.length} clips · ${gb.toFixed(1)} GB` : "No clips yet";
@@ -123,6 +141,9 @@ let listening = false;
 async function loadSettings() {
   settings = await invoke("get_settings");
   $("hotkey").textContent = settings.hotkey_label;
+  $("record-hotkey").textContent = settings.record_hotkey_label;
+  $("quality").value = settings.quality;
+  loadMonitors();
   const sel = $("buffer-len");
   if (![...sel.options].some((o) => +o.value === settings.buffer_secs)) {
     sel.add(new Option(`${settings.buffer_secs} seconds`, settings.buffer_secs));
@@ -137,30 +158,33 @@ async function loadSettings() {
   showAudio(settings.audio);
 }
 
-$("hotkey").onclick = () => {
-  listening = true;
-  $("hotkey").classList.add("listening");
-  $("hotkey").textContent = "Press keys… (Esc cancels)";
-};
+for (const b of document.querySelectorAll(".keybtn")) {
+  b.onclick = () => {
+    listening = b;
+    b.classList.add("listening");
+    b.textContent = "Press keys… (Esc cancels)";
+  };
+}
 window.addEventListener("keydown", async (e) => {
   if (!listening) return;
   e.preventDefault();
   if (MODIFIERS.includes(e.code)) return; // wait for the real key
+  const btn = listening;
   listening = false;
-  $("hotkey").classList.remove("listening");
+  btn.classList.remove("listening");
   if (e.code === "Escape") return loadSettings();
   try {
-    $("hotkey").textContent = await invoke("set_hotkey", {
-      hotkey: { code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey },
+    btn.textContent = await invoke("set_hotkey", {
+      hotkey: { code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey }, which: btn.dataset.which,
     });
-    say("Clip key saved.");
+    say("Key saved.");
   } catch (err) { say(err); loadSettings(); }
 });
 
 $("buffer-len").onchange = async (e) => {
   try {
     await invoke("set_buffer", { secs: +e.target.value });
-    say(status.buffer ? "Buffer length changed (the buffer restarted)." : "Buffer length saved.");
+    say(status.buffer ? "Clip length changed (clipping restarted)." : "Clip length saved.");
   } catch (err) { say(err); }
 };
 for (const name of ["sound", "toast", "autostart", "test_builds"]) {
@@ -225,6 +249,12 @@ function renderGames() {
       invoke("set_game_enabled", { name: g.name, enabled: cb.checked }).catch(say);
     };
     l.append(cb, document.createTextNode(g.name));
+    if (g.custom) {
+      const tag = document.createElement("span"); tag.className = "custom-tag"; tag.textContent = "added by you";
+      const rm = document.createElement("button"); rm.className = "remove"; rm.textContent = "Remove";
+      rm.onclick = (ev) => { ev.preventDefault(); invoke("remove_custom_game", { name: g.name }).then(loadGames, say); };
+      l.append(tag, rm);
+    }
     return l;
   }));
 }
@@ -234,11 +264,103 @@ $("game-filter").oninput = renderGames;
 const VOLUMES = { "a-game-volume": "game_volume", "a-discord-volume": "discord_volume", "a-mic-volume": "mic_volume" };
 let devicesLoaded = false;
 
+// ---------- quality / screen ----------
+$("quality").onchange = async (e) => {
+  try {
+    const restarted = await invoke("set_quality", { quality: e.target.value });
+    say(restarted ? "Quality saved. OBS restarted to use it." : "Quality saved. It's used from the next clipping session.");
+  } catch (err) { say(err); }
+};
+async function loadMonitors() {
+  const sel = $("screen-monitor");
+  const want = settings?.screen_monitor || "primary";
+  try {
+    const mons = status.obs === "ready" ? await invoke("list_monitors") : [];
+    sel.replaceChildren(new Option("Main screen", "primary"), new Option("All screens", "all"),
+      ...mons.map((m) => new Option(`${m.name.split(":")[0]} (${m.w}×${m.h})`, m.id)));
+  } catch (err) { say(err); }
+  if (![...sel.options].some((o) => o.value === want)) sel.add(new Option(want, want));
+  sel.value = want;
+}
+$("screen-monitor").onchange = (e) => invoke("set_screen_monitor", { monitor: e.target.value }).then(() => say("Screen saved."), say);
+
+// ---------- app picker ----------
+function pickApp(title) {
+  return new Promise(async (resolve) => {
+    $("picker-title").textContent = title;
+    $("picker-list").textContent = "Loading…";
+    $("picker").classList.remove("hidden");
+    const done = (v) => { $("picker").classList.add("hidden"); resolve(v); };
+    $("picker-close").onclick = () => done(null);
+    try {
+      const apps = await invoke("list_running_apps");
+      $("picker-list").replaceChildren(...apps.map((a) => {
+        const b = document.createElement("button");
+        b.textContent = a.name;
+        const s = document.createElement("small"); s.textContent = a.exe; b.append(s);
+        b.onclick = () => done(a);
+        return b;
+      }));
+      if (!apps.length) $("picker-list").textContent = "No apps with a window found.";
+    } catch (err) { $("picker-list").textContent = String(err); }
+  });
+}
+$("add-game").onclick = async () => {
+  const a = await pickApp("Add a clip application");
+  if (!a) return;
+  try { await invoke("add_custom_game", { app: a }); say(`${a.name} will now start clipping like a game.`); loadGames(); }
+  catch (err) { say(err); }
+};
+
+// ---------- level meters ----------
+listen("meters", (e) => {
+  for (const m of document.querySelectorAll(".meter")) {
+    const names = m.dataset.inputs.split(",");
+    const db = Math.max(-100, ...names.map((n) => e.payload[n] ?? -100));
+    const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));   // -60 dB .. 0 dB
+    const bar = m.querySelector("i");
+    bar.style.width = pct + "%";
+    bar.style.setProperty("--w", pct > 0 ? (100 / pct * 100) + "%" : "100%");
+  }
+});
+const meters = (on) => invoke("set_meters", { on }).catch(() => {});
+
+function renderAudioApps(a) {
+  $("audio-apps").replaceChildren(...a.apps.map((app, i) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const name = document.createElement("span"); name.textContent = app.name;
+    const r = document.createElement("input");
+    r.type = "range"; r.min = 0; r.max = 300; r.step = 5; r.value = Math.round((a.app_volumes[i] ?? 1) * 100);
+    const out = document.createElement("output"); out.textContent = r.value + "%";
+    r.oninput = () => { out.textContent = r.value + "%"; settings.audio.app_volumes[i] = r.value / 100; saveAudio(); };
+    const meter = document.createElement("div"); meter.className = "meter"; meter.dataset.inputs = `App ${i + 1}`;
+    meter.append(document.createElement("i"));
+    meter.style.maxWidth = "120px";
+    const rm = document.createElement("button"); rm.textContent = "Remove"; rm.className = "small";
+    rm.onclick = () => { settings.audio.apps.splice(i, 1); settings.audio.app_volumes.splice(i, 1); saveAudio(); renderAudioApps(settings.audio); };
+    row.append(name, r, out, meter, rm);
+    return row;
+  }));
+  $("add-audio-app").disabled = a.apps.length >= 2;
+}
+$("add-audio-app").onclick = async () => {
+  const app = await pickApp("Record the sound of…");
+  if (!app) return;
+  settings.audio.apps.push(app);
+  settings.audio.app_volumes.push(1);
+  renderAudioApps(settings.audio);
+  saveAudio();
+};
+
 function showAudio(a) {
   $("a-game-mode").value = a.game_mode;
   $("a-discord-enabled").checked = a.discord_enabled;
   $("a-mic-enabled").checked = a.mic_enabled;
   $("a-mic-noise").checked = a.mic_noise_suppression;
+  $("a-mic-boost").value = a.mic_boost_db;
+  $("a-mic-boost").nextElementSibling.textContent = "+" + a.mic_boost_db + " dB";
+  renderAudioApps(a);
   for (const [id, key] of Object.entries(VOLUMES)) {
     $(id).value = Math.round(a[key] * 100);
     $(id).nextElementSibling.textContent = Math.round(a[key] * 100) + "%";
@@ -252,7 +374,7 @@ function syncAudioRows() {
   $("row-desktop").classList.toggle("hidden", $("a-game-mode").value !== "desktop");
   $("a-game-volume").disabled = $("a-game-mode").value === "off";
   $("a-discord-volume").disabled = !$("a-discord-enabled").checked;
-  for (const id of ["a-mic-device", "a-mic-volume", "a-mic-noise"]) $(id).disabled = !$("a-mic-enabled").checked;
+  for (const id of ["a-mic-device", "a-mic-volume", "a-mic-noise", "a-mic-boost"]) $(id).disabled = !$("a-mic-enabled").checked;
 }
 
 function selectDevice(id, value) {
@@ -293,6 +415,9 @@ function saveAudio() {
     mic_device: $("a-mic-device").value || "default",
     mic_volume: $("a-mic-volume").value / 100,
     mic_noise_suppression: $("a-mic-noise").checked,
+    mic_boost_db: +$("a-mic-boost").value,
+    apps: settings.audio.apps || [],
+    app_volumes: settings.audio.app_volumes || [],
   };
   settings.audio = a;
   syncAudioRows();
@@ -303,6 +428,7 @@ function saveAudio() {
 for (const id of ["a-game-mode", "a-desktop-device", "a-discord-enabled", "a-mic-enabled", "a-mic-device", "a-mic-noise"]) {
   $(id).onchange = saveAudio;
 }
+$("a-mic-boost").oninput = (e) => { e.target.nextElementSibling.textContent = "+" + e.target.value + " dB"; saveAudio(); };
 for (const id of Object.keys(VOLUMES)) {
   $(id).oninput = (e) => { e.target.nextElementSibling.textContent = e.target.value + "%"; saveAudio(); };
 }

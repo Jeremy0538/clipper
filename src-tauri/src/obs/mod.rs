@@ -31,6 +31,8 @@ pub struct ObsManager {
     password: String,
     pid: Mutex<Option<u32>>,
     quitting: AtomicBool,
+    /// Set by `restart()`: the next OBS exit is expected.
+    restarting: AtomicBool,
 }
 
 impl ObsManager {
@@ -46,6 +48,7 @@ impl ObsManager {
             settings: Mutex::new(settings),
             pid: Mutex::new(None),
             quitting: AtomicBool::new(false),
+            restarting: AtomicBool::new(false),
         }))
     }
 
@@ -55,7 +58,7 @@ impl ObsManager {
         while !self.quitting.load(Ordering::SeqCst) {
             let started = Instant::now();
             match self.run_once(&report).await {
-                Ok(()) => report("stopped".into()),
+                Ok(()) => report("restarting".into()),
                 Err(e) => report(format!("error: {e:#}")),
             }
             if self.quitting.load(Ordering::SeqCst) {
@@ -133,10 +136,22 @@ impl ObsManager {
         let t0 = Instant::now();
         loop {
             match setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await {
-                Ok(()) => break,
+                Ok(()) => {
+                    let _ = setup::set_track_names(&self.client, &settings.audio).await;
+                    // Always come up in game mode (OBS may remember the Screen scene).
+                    let _ = self.client.call("SetCurrentProgramScene", serde_json::json!({ "sceneName": config::SCENE })).await;
+                    break;
+                }
                 Err(e) if t0.elapsed() < Duration::from_secs(60) => {
                     crate::clog!("scene setup not done yet: {e:#}");
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                    if let Some(st) = child.try_wait()? {
+                        bail!("OBS exited while starting ({st})");
+                    }
+                    // The socket may have belonged to an OBS that was still shutting down.
+                    if !self.client.is_connected().await {
+                        let _ = self.client.connect(WS_PORT, &self.password).await;
+                    }
                 }
                 Err(e) => {
                     let _ = child.start_kill();
@@ -149,6 +164,9 @@ impl ObsManager {
 
         let status = child.wait().await?;
         *self.pid.lock().unwrap() = None;
+        if self.restarting.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
         if !self.quitting.load(Ordering::SeqCst) {
             bail!("OBS exited ({status})");
         }
@@ -159,7 +177,8 @@ impl ObsManager {
     pub async fn apply_audio(&self) -> Result<()> {
         let s = self.settings.lock().unwrap().clone();
         let specs = setup::specs(&self.data_dir, &s.audio);
-        setup::ensure_scene(&self.client, &specs, s.width, s.height).await
+        setup::ensure_scene(&self.client, &specs, s.width, s.height).await?;
+        setup::set_track_names(&self.client, &s.audio).await
     }
 
     /// An OBS left over from an earlier Clipper (crash, killed in Task Manager)
@@ -191,6 +210,20 @@ impl ObsManager {
             crate::clog!("closed {killed} leftover OBS process(es)");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+
+    /// Restart OBS so it picks up new encoder settings (only while it's idle).
+    pub fn restart(&self) {
+        let Some(pid) = *self.pid.lock().unwrap() else { return };
+        self.restarting.store(true, Ordering::SeqCst);
+        let pid = pid.to_string();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).creation_flags(0x0800_0000).status();
+        }
+        #[cfg(not(windows))]
+        let _ = std::process::Command::new("kill").args(["-TERM", &pid]).status();
     }
 
     /// Stop OBS for good (app is quitting). Gentle first, forced after a few seconds.

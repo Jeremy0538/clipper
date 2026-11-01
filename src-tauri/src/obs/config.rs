@@ -21,11 +21,13 @@ pub struct Settings {
     pub height: u32,
     pub bitrate_kbps: u32,
     pub audio: crate::settings::AudioSettings,
+    /// "high" | "balanced" | "small"
+    pub quality: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default() }
+        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default(), quality: "balanced".into() }
     }
 }
 
@@ -73,6 +75,20 @@ impl ObsPaths {
 /// Paths in OBS ini files use forward slashes on every platform.
 fn ini_path(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+/// Same resolution for every level; only the bitrate changes. VBR spends bits
+/// where the picture needs them, so "balanced" is about half of "high".
+fn encoder_settings(s: &Settings) -> serde_json::Value {
+    let (rc, bitrate, max) = match s.quality.as_str() {
+        "high" => ("CBR", s.bitrate_kbps, s.bitrate_kbps),
+        "small" => ("VBR", 12_000, 20_000),
+        _ => ("VBR", 20_000, 35_000),
+    };
+    serde_json::json!({
+        "rate_control": rc, "bitrate": bitrate, "max_bitrate": max,
+        "keyint_sec": 1, "preset2": "p5", "profile": "high", "bf": 2, "lookahead": true,
+    })
 }
 
 /// Websocket password: generated once, kept in our data dir.
@@ -129,11 +145,12 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
             "[General]\nName={PROFILE}\n\n\
              [Output]\nMode=Advanced\nFilenameFormatting=Clip %CCYY-%MM-%DD %hh-%mm-%ss\nDelayEnable=false\n\n\
              [AdvOut]\nRecType=Standard\nRecFilePath={rec}\nRecFormat2=mp4\nRecEncoder=obs_nvenc_h264_tex\n\
-             RecTracks=15\nRecRB=true\nRecRBTime={secs}\nRecRBSize=8192\nRecRBPrefix=Replay\n\
+             RecTracks={tracks}\nRecRB=true\nRecRBTime={secs}\nRecRBSize=8192\nRecRBPrefix=Replay\n\
              Track1Name=Mix\nTrack2Name=Game\nTrack3Name=Discord\nTrack4Name=Mic\n\n\
              [Video]\nBaseCX={w}\nBaseCY={h}\nOutputCX={w}\nOutputCY={h}\nFPSType=0\nFPSCommon={fps}\n\n\
              [Audio]\nSampleRate=48000\nChannelSetup=Stereo\n",
             rec = ini_path(incoming),
+            tracks = super::setup::track_mask(&s.audio),
             secs = s.buffer_secs,
             w = s.width,
             h = s.height,
@@ -143,13 +160,7 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
     // 1 s keyframes keep trimming/seeking in the editor snappy.
     fs::write(
         profile.join("recordEncoder.json"),
-        serde_json::to_string(&serde_json::json!({
-            "rate_control": "CBR",
-            "bitrate": s.bitrate_kbps,
-            "keyint_sec": 1,
-            "preset2": "p5",
-            "profile": "high",
-        }))?,
+        serde_json::to_string(&encoder_settings(s))?,
     )?;
 
     // An empty scene; inputs are (re)created over the websocket on every start.

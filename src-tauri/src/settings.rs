@@ -1,6 +1,6 @@
 //! User settings, stored as settings.json in the data folder.
 
-use crate::hotkey::Hotkey;
+use crate::{games::AppRef, hotkey::Hotkey};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -11,6 +11,8 @@ pub const MAX_BUFFER_SECS: u32 = 300;
 #[serde(default)]
 pub struct UserSettings {
     pub hotkey: Hotkey,
+    /// Start/stop a normal recording.
+    pub record_hotkey: Hotkey,
     pub buffer_secs: u32,
     /// Chime when a clip is saved.
     pub sound: bool,
@@ -19,12 +21,18 @@ pub struct UserSettings {
     pub audio: AudioSettings,
     /// Games the user switched off: no buffer while they run.
     pub disabled_games: Vec<String>,
+    /// Apps the user added as clip applications (treated like games).
+    pub custom_games: Vec<AppRef>,
     /// Start hidden in the tray when Windows starts.
     pub autostart: bool,
     /// Offer test builds (pre-releases) as updates.
     pub test_builds: bool,
     /// "system" | "light" | "dark" | "oled"
     pub theme: String,
+    /// Screen mode: "primary", "all" or an OBS monitor id.
+    pub screen_monitor: String,
+    /// "high" | "balanced" | "small"
+    pub quality: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -52,6 +60,12 @@ pub struct AudioSettings {
     pub mic_device: String,
     pub mic_volume: f64,
     pub mic_noise_suppression: bool,
+    /// Extra gain on the microphone in dB (0..=30), before a limiter.
+    pub mic_boost_db: f64,
+    /// Up to two extra apps recorded on their own tracks (5 and 6).
+    pub apps: Vec<AppRef>,
+    /// Volume per entry in `apps` (1.0 = as played).
+    pub app_volumes: Vec<f64>,
 }
 
 impl Default for AudioSettings {
@@ -66,13 +80,16 @@ impl Default for AudioSettings {
             mic_device: "default".into(),
             mic_volume: 1.0,
             mic_noise_suppression: true,
+            mic_boost_db: 0.0,
+            apps: vec![],
+            app_volumes: vec![],
         }
     }
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], autostart: true, test_builds: true, theme: "system".into() }
+        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: true, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into() }
     }
 }
 
@@ -84,6 +101,9 @@ impl UserSettings {
             .unwrap_or_default();
         if s.hotkey.vk().is_none() {
             s.hotkey = Hotkey::default();
+        }
+        if s.record_hotkey.vk().is_none() {
+            s.record_hotkey = Hotkey::default_record();
         }
         s.buffer_secs = s.buffer_secs.clamp(MIN_BUFFER_SECS, MAX_BUFFER_SECS);
         s

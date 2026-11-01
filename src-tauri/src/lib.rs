@@ -5,7 +5,10 @@ mod editor;
 mod tools;
 mod games;
 mod hotkey;
+mod installer;
 mod log;
+mod modes;
+mod screen;
 mod notify;
 mod obs;
 mod settings;
@@ -35,6 +38,10 @@ pub struct Status {
     pub obs: String,
     pub buffer: bool,
     pub game: Option<String>,
+    /// A normal recording is running.
+    pub recording: bool,
+    /// Screen mode (monitor capture) instead of game capture.
+    pub screen: bool,
 }
 
 pub struct AppState {
@@ -49,6 +56,9 @@ pub struct AppState {
     pub settings_file: PathBuf,
     /// The clip open in the editor.
     pub editor: Mutex<Option<editor::ClipInfo>>,
+    /// The settings page is open: forward audio levels to it.
+    pub meters: AtomicBool,
+    pub screen: AtomicBool,
 }
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
@@ -125,17 +135,53 @@ async fn get_status(state: tauri::State<'_, AppState>) -> Result<Status, String>
 }
 
 #[tauri::command]
-async fn start_buffer(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.user_stopped.store(false, Ordering::SeqCst);
-    state.obs.client.call("StartReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
-    Ok(())
+async fn start_buffer(app: AppHandle) -> Result<(), String> {
+    modes::start_clipping(&app).await.map_err(|e| { clog!("start clipping: {e}"); e })
 }
 
 #[tauri::command]
-async fn stop_buffer(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.user_stopped.store(true, Ordering::SeqCst);
-    state.obs.client.call("StopReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
-    Ok(())
+async fn stop_buffer(app: AppHandle) -> Result<(), String> {
+    modes::stop_clipping(&app).await
+}
+
+#[tauri::command]
+async fn toggle_recording(app: AppHandle) -> Result<(), String> {
+    modes::toggle_recording(&app).await.map_err(|e| { clog!("recording: {e}"); e })
+}
+
+#[tauri::command]
+async fn list_monitors(state: tauri::State<'_, AppState>) -> Result<Vec<screen::Monitor>, String> {
+    screen::list_monitors(&state.obs.client).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn set_screen_monitor(state: tauri::State<'_, AppState>, monitor: String) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.screen_monitor = monitor;
+    clog!("screen monitor: {}", u.screen_monitor);
+    u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+/// New encoder settings need an OBS restart: done right away when nothing is
+/// being written, otherwise at the next start.
+#[tauri::command]
+async fn set_quality(state: tauri::State<'_, AppState>, quality: String) -> Result<bool, String> {
+    if !["high", "balanced", "small"].contains(&quality.as_str()) {
+        return Err(format!("unknown quality {quality}"));
+    }
+    {
+        let mut u = state.user.lock().await;
+        u.quality = quality.clone();
+        u.save(&state.settings_file).map_err(|e| e.to_string())?;
+    }
+    state.obs.settings.lock().unwrap().quality = quality.clone();
+    clog!("quality: {quality}");
+    let s = state.status.lock().await.clone();
+    if s.buffer || s.recording {
+        return Ok(false);
+    }
+    state.obs.restart();
+    Ok(true)
 }
 
 #[tauri::command]
@@ -147,6 +193,7 @@ async fn save_clip(app: AppHandle) -> Result<(), String> {
 struct SettingsView {
     hotkey: hotkey::Hotkey,
     hotkey_label: String,
+    record_hotkey_label: String,
     buffer_secs: u32,
     max_buffer_secs: u32,
     sound: bool,
@@ -154,6 +201,8 @@ struct SettingsView {
     autostart: bool,
     test_builds: bool,
     theme: String,
+    screen_monitor: String,
+    quality: String,
     version: String,
     audio: AudioSettings,
 }
@@ -164,6 +213,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
     Ok(SettingsView {
         hotkey: u.hotkey.clone(),
         hotkey_label: u.hotkey.label(),
+        record_hotkey_label: u.record_hotkey.label(),
         buffer_secs: u.buffer_secs,
         max_buffer_secs: MAX_BUFFER_SECS,
         sound: u.sound,
@@ -171,6 +221,8 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         autostart: u.autostart,
         test_builds: u.test_builds,
         theme: u.theme.clone(),
+        screen_monitor: u.screen_monitor.clone(),
+        quality: u.quality.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
     })
@@ -178,13 +230,22 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
 
 /// Returns the new key's label.
 #[tauri::command]
-async fn set_hotkey(state: tauri::State<'_, AppState>, hotkey: hotkey::Hotkey) -> Result<String, String> {
-    hotkey::apply(&hotkey)?;
-    clog!("clip key set to {}", hotkey.label());
+async fn set_hotkey(state: tauri::State<'_, AppState>, hotkey: hotkey::Hotkey, which: Option<String>)
+    -> Result<String, String>
+{
+    let record = which.as_deref() == Some("record");
     let mut u = state.user.lock().await;
-    u.hotkey = hotkey;
+    let other = if record { &u.hotkey } else { &u.record_hotkey };
+    if other.vk() == hotkey.vk() && other.shift == hotkey.shift && other.ctrl == hotkey.ctrl && other.alt == hotkey.alt {
+        return Err("That key is already used for the other action".into());
+    }
+    let slot = if record { hotkey::Slot::Record } else { hotkey::Slot::Clip };
+    hotkey::apply(slot, &hotkey)?;
+    clog!("{} key set to {}", if record { "record" } else { "clip" }, hotkey.label());
+    let label = hotkey.label();
+    if record { u.record_hotkey = hotkey } else { u.hotkey = hotkey }
     u.save(&state.settings_file).map_err(|e| e.to_string())?;
-    Ok(u.hotkey.label())
+    Ok(label)
 }
 
 /// Changing the length restarts a running buffer (OBS reads it on start).
@@ -253,7 +314,20 @@ async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> R
         u.save(&state.settings_file).map_err(|e| e.to_string())?;
     }
     clog!("audio settings: {audio:?}");
-    state.obs.settings.lock().unwrap().audio = audio;
+    let tracks_changed = {
+        let mut s = state.obs.settings.lock().unwrap();
+        let changed = obs::setup::track_mask(&s.audio) != obs::setup::track_mask(&audio);
+        s.audio = audio;
+        changed
+    };
+    // A different number of tracks needs an OBS restart (when nothing runs).
+    if tracks_changed {
+        let st = state.status.lock().await.clone();
+        if !st.buffer && !st.recording && state.obs.client.is_connected().await {
+            state.obs.restart();
+            return Ok(());
+        }
+    }
     if state.obs.client.is_connected().await {
         state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
         // Make the game detector point Game Audio at the game again.
@@ -273,6 +347,35 @@ async fn list_audio_devices(state: tauri::State<'_, AppState>, output: bool)
 struct GameEntry {
     name: String,
     enabled: bool,
+    /// Added by the user (can be removed again).
+    custom: bool,
+}
+
+#[tauri::command]
+async fn list_running_apps() -> Result<Vec<games::AppRef>, String> {
+    tauri::async_runtime::spawn_blocking(games::running_apps).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_custom_game(state: tauri::State<'_, AppState>, app: games::AppRef) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.custom_games.retain(|g| !g.exe.eq_ignore_ascii_case(&app.exe));
+    clog!("clip application added: {} ({})", app.name, app.exe);
+    u.custom_games.push(app);
+    u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_custom_game(state: tauri::State<'_, AppState>, name: String) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.custom_games.retain(|g| g.name != name);
+    clog!("clip application removed: {name}");
+    u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_meters(state: tauri::State<'_, AppState>, on: bool) {
+    state.meters.store(on, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -281,13 +384,14 @@ async fn list_games(state: tauri::State<'_, AppState>) -> Result<Vec<GameEntry>,
         .await
         .map_err(|e| e.to_string())?;
     let u = state.user.lock().await;
-    Ok(names
-        .into_iter()
-        .map(|name| GameEntry {
-            enabled: !u.disabled_games.iter().any(|d| d.eq_ignore_ascii_case(&name)),
-            name,
-        })
-        .collect())
+    let enabled = |n: &str| !u.disabled_games.iter().any(|d| d.eq_ignore_ascii_case(n));
+    let mut out: Vec<GameEntry> = u
+        .custom_games
+        .iter()
+        .map(|g| GameEntry { enabled: enabled(&g.name), name: g.name.clone(), custom: true })
+        .collect();
+    out.extend(names.into_iter().map(|name| GameEntry { enabled: enabled(&name), name, custom: false }));
+    Ok(out)
 }
 
 #[tauri::command]
@@ -404,7 +508,9 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
     let tools = tools_for(&app).await?;
     clog!("editor: export {:.2}-{:.2} volumes {:?}", request.start, request.end, request.volumes);
     let h = app.clone();
-    let out = editor::export(&tools, &st.clips_dir, &info, &request, move |p| { let _ = h.emit("export-progress", p); })
+    // The edited copy goes next to the original (its game folder).
+    let folder = std::path::Path::new(&info.path).parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir.clone());
+    let out = editor::export(&tools, &folder, &info, &request, move |p| { let _ = h.emit("export-progress", p); })
         .await
         .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
     clog!("editor: saved {}", out.display());
@@ -452,14 +558,18 @@ async fn watch_events(app: AppHandle) {
                 let state = ev["eventData"]["outputState"].as_str().unwrap_or("?");
                 clog!("buffer {}", state.trim_start_matches("OBS_WEBSOCKET_OUTPUT_").to_lowercase());
                 if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
-                    notify::info(&app, "Buffer stopped", "");
+                    notify::info(&app, "Clipping stopped", "");
                 }
                 set_status(&app, |s| s.buffer = active).await;
             }
             "ReplayBufferSaved" => {
                 let Some(src) = ev["eventData"]["savedReplayPath"].as_str() else { continue };
                 let st = app.state::<AppState>();
-                let game = st.status.lock().await.game.clone();
+                let game = match st.status.lock().await.game.clone() {
+                    Some(g) => Some(g),
+                    None if st.screen.load(Ordering::SeqCst) => Some("Screen".to_string()),
+                    None => None,
+                };
                 clog!("OBS wrote {src}");
                 match clips::adopt(src.as_ref(), &st.clips_dir, game.as_deref()) {
                     Ok(p) => {
@@ -470,6 +580,57 @@ async fn watch_events(app: AppHandle) {
                     }
                     Err(e) => report_error(&app, format!("Could not store clip: {e:#}")),
                 }
+            }
+            "RecordStateChanged" => {
+                let d = &ev["eventData"];
+                let active = d["outputActive"].as_bool().unwrap_or(false);
+                let state = d["outputState"].as_str().unwrap_or("?");
+                clog!("recording {}", state.trim_start_matches("OBS_WEBSOCKET_OUTPUT_").to_lowercase());
+                set_status(&app, |s| s.recording = active).await;
+                if state == "OBS_WEBSOCKET_OUTPUT_STARTED" {
+                    notify::info(&app, "Recording started", "");
+                }
+                if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
+                    let st = app.state::<AppState>();
+                    if let Some(src) = d["outputPath"].as_str() {
+                        let folder = st.status.lock().await.game.clone().unwrap_or_else(|| "Screen recording".into());
+                        match clips::adopt(src.as_ref(), &st.clips_dir, Some(&folder)) {
+                            Ok(p) => {
+                                clog!("recording saved: {}", p.display());
+                                notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                                let _ = app.emit("clip-saved", p.to_string_lossy());
+                            }
+                            Err(e) => report_error(&app, format!("Could not store recording: {e:#}")),
+                        }
+                    }
+                    if !st.status.lock().await.buffer {
+                        let _ = modes::leave_screen(&app).await;
+                    }
+                }
+            }
+            "InputVolumeMeters" => {
+                // ~20/s from OBS: forward at most 10/s, only while someone looks.
+                static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+                if !app.state::<AppState>().meters.load(Ordering::SeqCst) {
+                    continue;
+                }
+                {
+                    let mut l = LAST.lock().unwrap();
+                    if l.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(100)) {
+                        continue;
+                    }
+                    *l = Some(std::time::Instant::now());
+                }
+                let mut levels = serde_json::Map::new();
+                for i in ev["eventData"]["inputs"].as_array().into_iter().flatten() {
+                    let Some(name) = i["inputName"].as_str() else { continue };
+                    // inputLevelsMul: per channel [magnitude, peak, input peak]; use the peak.
+                    let peak = i["inputLevelsMul"].as_array().into_iter().flatten()
+                        .filter_map(|c| c[1].as_f64()).fold(0.0f64, f64::max);
+                    let db = if peak > 0.0 { 20.0 * peak.log10() } else { -100.0 };
+                    levels.insert(name.to_string(), json!((db * 10.0).round() / 10.0));
+                }
+                let _ = app.emit("meters", levels);
             }
             DISCONNECTED => {
                 clog!("OBS websocket disconnected");
@@ -487,8 +648,13 @@ fn dir_from_env(var: &str) -> Option<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let start_hidden = std::env::args().any(|a| a == "--hidden");
+    // After an in-app update: let the old version (and its OBS) exit first.
     updater::wait_for_previous();
+    if let installer::Action::Exit = installer::handle_start() {
+        return;
+    }
+    let start_hidden = std::env::args().any(|a| a == "--hidden");
+    let just_installed = std::env::args().any(|a| a == "--installed");
 
     let app = tauri::Builder::default()
         // A second start (desktop icon while it runs in the tray) opens the
@@ -497,7 +663,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
             set_buffer, set_option, open_log_folder, set_audio,
-            list_audio_devices, list_games, set_game_enabled,
+            list_audio_devices, list_games, set_game_enabled, list_running_apps, add_custom_game, toggle_recording, list_monitors,
+            set_screen_monitor, set_quality,
+            remove_custom_game, set_meters,
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, ui_log
@@ -515,6 +683,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&clips_dir)?;
             log::init(data_dir.join("clipper.log"));
+            clips::sort_into_folders(&clips_dir);
             updater::cleanup();
             let _ = std::fs::remove_dir_all(data_dir.join("editor-cache"));
             clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
@@ -522,12 +691,14 @@ pub fn run() {
             let settings_file = data_dir.join("settings.json");
             let user = UserSettings::load(&settings_file);
             autostart::apply(user.autostart);
-            hotkey::apply(&user.hotkey)?;
+            hotkey::apply(hotkey::Slot::Clip, &user.hotkey)?;
+            hotkey::apply(hotkey::Slot::Record, &user.record_hotkey)?;
             hotkey::start(handle.clone());
             #[allow(unused_mut)]
             let mut settings = Settings {
                 buffer_secs: user.buffer_secs,
                 audio: user.audio.clone(),
+                quality: user.quality.clone(),
                 ..Settings::default()
             };
             // Canvas = primary monitor (games run there); even sizes for the encoder.
@@ -546,6 +717,8 @@ pub fn run() {
                 user: Mutex::new(user),
                 settings_file,
                 editor: Mutex::new(None),
+                meters: AtomicBool::new(false),
+                screen: AtomicBool::new(false),
             });
 
             // Tray
@@ -594,6 +767,7 @@ pub fn run() {
                 }
                 if state == "ready" {
                     h.state::<AppState>().obs_session.fetch_add(1, Ordering::SeqCst);
+                    h.state::<AppState>().screen.store(false, Ordering::SeqCst);
                 }
                 tauri::async_runtime::spawn(async move {
                     set_status(&h, |s| s.obs = state).await;
@@ -602,6 +776,15 @@ pub fn run() {
             tauri::async_runtime::spawn(watch_events(handle.clone()));
             tauri::async_runtime::spawn(autobuffer::run(handle.clone()));
             notify::setup(&handle)?;
+            if just_installed {
+                clog!("installed to {}", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default());
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    notify::info(&h, "Clipper is installed", "You can delete the downloaded file");
+                    let _ = h.emit("error", "Clipper is installed: start it from the Start menu or desktop from now on. The downloaded file can be deleted.");
+                });
+            }
 
             // Look for an update shortly after start; tell the user, never auto-install.
             let h = handle.clone();
@@ -623,6 +806,10 @@ pub fn run() {
                 show_main(&handle);
             }
             // Development: open a tab directly (screenshots without clicking).
+            #[cfg(debug_assertions)]
+            if let (Some(js), Some(w)) = (std::env::var("CLIPPER_DEV_JS_FILE").ok().and_then(|f| std::fs::read_to_string(f).ok()), handle.get_webview_window("main")) {
+                let _ = w.eval(&format!("setTimeout(async () => {{ try {{ {js} }} catch (e) {{ uiLog('dev js: ' + e); }} }}, 6000)"));
+            }
             #[cfg(debug_assertions)]
             if let (Ok(_), Some(w)) = (std::env::var("CLIPPER_DEV_EDIT"), handle.get_webview_window("main")) {
                 let then = if std::env::var("CLIPPER_DEV_EDIT").as_deref() == Ok("export") {

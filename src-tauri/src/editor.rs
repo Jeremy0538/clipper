@@ -26,6 +26,9 @@ pub struct Track {
     pub name: String,
     /// Extracted copy for the preview player.
     pub file: String,
+    /// Part of the rebuilt Mix. False for Discord/apps when a "Desktop" track
+    /// (everything you heard) already contains them.
+    pub in_mix: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -58,9 +61,11 @@ async fn run(mut c: tokio::process::Command) -> Result<std::process::Output> {
 }
 
 fn track_name(pos: usize, tags: &serde_json::Value, total: usize) -> String {
-    for key in ["title", "handler_name"] {
+    // OBS writes the track name as "name"; our own exports as title/handler_name.
+    for key in ["name", "title", "handler_name"] {
         if let Some(t) = tags[key].as_str() {
-            if LAYOUT.iter().any(|n| n.eq_ignore_ascii_case(t)) {
+            let t = t.trim();
+            if !t.is_empty() && !t.eq_ignore_ascii_case("SoundHandler") {
                 return t.to_string();
             }
         }
@@ -72,7 +77,7 @@ fn track_name(pos: usize, tags: &serde_json::Value, total: usize) -> String {
 pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> {
     let mut c = command(&tools.ffprobe);
     c.args(["-v", "error", "-show_entries",
-            "format=duration:stream=index,codec_type,width,height:stream_tags=title,handler_name",
+            "format=duration:stream=index,codec_type,width,height:stream_tags=name,title,handler_name",
             "-of", "json"]).arg(path);
     let probe: serde_json::Value = serde_json::from_slice(&run(c).await?.stdout)?;
     let duration: f64 = probe["format"]["duration"].as_str().and_then(|d| d.parse().ok()).context("no duration")?;
@@ -96,9 +101,15 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
                 index: i,
                 name: track_name(i, &audio[i]["tags"], audio.len()),
                 file: f.to_string_lossy().into_owned(),
+                in_mix: true,
             });
         }
         run(c).await.context("could not read the audio tracks")?;
+        if sources.iter().any(|t| t.name.eq_ignore_ascii_case("Desktop")) {
+            for t in &mut sources {
+                t.in_mix = t.name.eq_ignore_ascii_case("Desktop") || t.name.eq_ignore_ascii_case("Mic");
+            }
+        }
     }
     Ok(ClipInfo {
         path: path.to_string_lossy().into_owned(),
@@ -126,7 +137,7 @@ async fn peak_db(tools: &Tools, path: &Path, index: usize, start: f64, end: f64)
 }
 
 /// "<Game> 2026-11-01 14-17-58" → "<Game>"; also strips an earlier " (edited)".
-fn base_name(stem: &str) -> String {
+pub fn base_name(stem: &str) -> String {
     let mut s = stem.trim().to_string();
     let b = s.as_bytes();
     if b.len() >= 20 {
@@ -170,6 +181,12 @@ pub async fn export(
         keep = info.sources.iter().zip(req.volumes.iter().copied().chain(std::iter::repeat(1.0))).collect();
     }
 
+    // Sources whose sound already sits in "Desktop" stay out of the new Mix.
+    let mut mixed: Vec<(&Track, f64)> = keep.iter().filter(|(t, _)| t.in_mix).cloned().collect();
+    if mixed.is_empty() {
+        mixed = keep.clone();
+    }
+
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
     let mut out = clips_dir.join(format!("{} (edited) {stamp}.mp4", base_name(&info.name)));
     let mut n = 2;
@@ -187,22 +204,22 @@ pub async fn export(
         }
         c.arg("-i").arg(src);
         let mut graph = String::new();
-        if !keep.is_empty() {
-            for (k, (t, v)) in keep.iter().enumerate() {
+        if !mixed.is_empty() {
+            for (k, (t, v)) in mixed.iter().enumerate() {
                 graph += &format!("[0:a:{}]volume={:.3}[s{k}];", t.index, v.clamp(0.0, 20.0));
             }
-            if keep.len() == 1 {
+            if mixed.len() == 1 {
                 graph += "[s0]anull[mix]";
             } else {
-                for k in 0..keep.len() {
+                for k in 0..mixed.len() {
                     graph += &format!("[s{k}]");
                 }
-                graph += &format!("amix=inputs={}:normalize=0:dropout_transition=0[mix]", keep.len());
+                graph += &format!("amix=inputs={}:normalize=0:dropout_transition=0[mix]", mixed.len());
             }
             c.args(["-filter_complex", &graph]);
         }
         c.args(["-map", "0:v:0"]);
-        if !keep.is_empty() {
+        if !mixed.is_empty() {
             c.args(["-map", "[mix]"]);
             if keep.len() > 1 || info.sources.len() > 1 {
                 for (t, _) in &keep {

@@ -54,7 +54,12 @@ function renderTracks() {
     const name = document.createElement("span");
     name.textContent = t.s.name;
     const r = document.createElement("input");
-    r.type = "range"; r.min = 0; r.max = 300; r.step = 5; r.value = 100;   // 100% = as recorded
+    r.type = "range"; r.min = 0; r.max = 500; r.step = 5; r.value = 100;   // 100% = as recorded
+    if (!t.s.in_mix) {   // already part of "Desktop": would be heard twice
+      r.disabled = true; r.value = 0; t.gain.gain.value = 0;
+      name.title = "Already part of the Desktop track";
+      name.textContent += " (in Desktop)";
+    }
     const out = document.createElement("output");
     out.textContent = "100%";
     r.oninput = () => { t.gain.gain.value = r.value / 100; out.textContent = r.value + "%"; };

@@ -135,7 +135,8 @@ impl Detector {
 
     /// One scan of the process list.
     /// `disabled`: game names the user switched off (case-insensitive).
-    pub fn detect(&mut self, disabled: &[String]) -> Option<Game> {
+    /// `custom`: apps the user added as clip applications (matched by exe name).
+    pub fn detect(&mut self, disabled: &[String], custom: &[AppRef]) -> Option<Game> {
         if self.indexed.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
             self.steam = index_steam();
             self.indexed = Some(Instant::now());
@@ -157,7 +158,13 @@ impl Detector {
             let exe = p.exe().map(|e| norm(&e.to_string_lossy())).unwrap_or_default();
             let cmd = norm(&p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
 
-            let name = if matches!(pname.as_str(), "java" | "javaw" | "java.exe" | "javaw.exe")
+            let custom_name = custom.iter().find(|c| {
+                let e = c.exe.to_lowercase();
+                pname == e || pname == e.trim_end_matches(".exe")
+            });
+            let name = if let Some(c) = custom_name {
+                Some(c.name.as_str())
+            } else if matches!(pname.as_str(), "java" | "javaw" | "java.exe" | "javaw.exe")
                 && cmd.contains("minecraft")
             {
                 Some("Minecraft")
@@ -177,6 +184,63 @@ impl Detector {
         candidates.sort_by_key(|c| c.1);
         pick(candidates)
     }
+}
+
+/// An application picked by the user: a clip application or an extra audio source.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct AppRef {
+    pub name: String,
+    /// Executable file name, e.g. "Spotify.exe".
+    pub exe: String,
+    /// OBS window string ("title:class:exe") seen when it was picked (Windows).
+    #[serde(default)]
+    pub window: String,
+}
+
+/// Programs that are never offered in the "add an app" lists.
+const NOT_APPS: &[&str] = &["clipper.exe", "obs64.exe", "explorer.exe", "textinputhost.exe",
+    "applicationframehost.exe", "systemsettings.exe", "shellexperiencehost.exe",
+    "searchhost.exe", "startmenuexperiencehost.exe", "lockapp.exe", "msedgewebview2.exe"];
+
+fn pretty_name(exe: &str) -> String {
+    let stem = exe.trim_end_matches(".exe").trim_end_matches(".EXE");
+    let mut c = stem.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => exe.to_string(),
+    }
+}
+
+/// Programs with a visible window right now, one entry per exe, sorted by name.
+#[cfg(windows)]
+pub fn running_apps() -> Vec<AppRef> {
+    let mut out: Vec<AppRef> = win::all_windows()
+        .into_iter()
+        .filter(|w| !NOT_APPS.contains(&w.exe.to_lowercase().as_str()) && !w.title.trim().is_empty())
+        .map(|w| AppRef { name: pretty_name(&w.exe), exe: w.exe.clone(), window: w.obs_string() })
+        .collect();
+    out.sort_by_key(|a| a.name.to_lowercase());
+    out.dedup_by(|a, b| a.exe.eq_ignore_ascii_case(&b.exe));
+    out
+}
+
+/// Linux (development): named processes, so the picker can be exercised.
+#[cfg(not(windows))]
+pub fn running_apps() -> Vec<AppRef> {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut out: Vec<AppRef> = sys
+        .processes()
+        .values()
+        .filter(|p| p.thread_kind().is_none() && p.exe().is_some())
+        .map(|p| p.name().to_string_lossy().into_owned())
+        .filter(|n| !NOT_APPS.contains(&n.to_lowercase().as_str()))
+        .map(|n| AppRef { name: pretty_name(&n), exe: n, window: String::new() })
+        .collect();
+    out.sort_by_key(|a| a.name.to_lowercase());
+    out.dedup_by(|a, b| a.exe == b.exe);
+    out.truncate(60);
+    out
 }
 
 /// Windows: prefer the process with the biggest window (skips launchers' helper
@@ -277,6 +341,53 @@ mod win {
         }
     }
 
+    struct All {
+        found: Vec<(HWND, u32, i64)>,
+    }
+
+    unsafe extern "system" fn each_any(hwnd: HWND, lp: LPARAM) -> BOOL {
+        let s = &mut *(lp.0 as *mut All);
+        if IsWindowVisible(hwnd).as_bool() && GetWindow(hwnd, GW_OWNER).map(|o| o.0.is_null()).unwrap_or(true) {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd, &mut r).is_ok() || IsIconic(hwnd).as_bool() {
+                let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                if area >= 200 * 150 || IsIconic(hwnd).as_bool() {
+                    s.found.push((hwnd, pid, area));
+                }
+            }
+        }
+        true.into()
+    }
+
+    /// Every visible top-level window (one per process: the biggest).
+    pub fn all_windows() -> Vec<Win> {
+        let mut s = All { found: vec![] };
+        unsafe {
+            let _ = EnumWindows(Some(each_any), LPARAM(&mut s as *mut _ as isize));
+        }
+        s.found.sort_by_key(|f| std::cmp::Reverse(f.2));
+        let mut seen = std::collections::HashSet::new();
+        s.found
+            .into_iter()
+            .filter(|f| seen.insert(f.1))
+            .filter_map(|(hwnd, pid, area)| describe(hwnd, pid, area))
+            .collect()
+    }
+
+    fn describe(hwnd: HWND, pid: u32, area: i64) -> Option<Win> {
+        let mut t = [0u16; 512];
+        let mut c = [0u16; 256];
+        let (tn, cn) = unsafe { (GetWindowTextW(hwnd, &mut t), GetClassNameW(hwnd, &mut c)) };
+        Some(Win {
+            title: String::from_utf16_lossy(&t[..tn.max(0) as usize]),
+            class: String::from_utf16_lossy(&c[..cn.max(0) as usize]),
+            exe: exe_name(pid)?,
+            area,
+        })
+    }
+
     pub fn main_window(pid: u32) -> Option<Win> {
         let mut s = Search { pid, best: None };
         unsafe {
@@ -314,6 +425,9 @@ mod tests {
         for g in &games {
             println!("steam: {} -> {}", g.name, g.dir);
         }
-        println!("running: {:?}", Detector::new().detect(&[]));
+        println!("running: {:?}", Detector::new().detect(&[], &[]));
+        for a in running_apps() {
+            println!("app: {} ({})", a.name, a.exe);
+        }
     }
 }

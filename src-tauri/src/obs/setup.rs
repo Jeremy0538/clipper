@@ -13,9 +13,14 @@ pub const GAME_CAPTURE: &str = "Game Capture";
 pub const GAME_AUDIO: &str = "Game Audio";
 pub const DISCORD: &str = "Discord";
 pub const MIC: &str = "Mic";
+pub const APP_INPUTS: [&str; 2] = ["App 1", "App 2"];
 /// Audio inputs we own: removed when switched off.
-const MANAGED_AUDIO: [&str; 3] = [GAME_AUDIO, DISCORD, MIC];
+const MANAGED_AUDIO: [&str; 5] = [GAME_AUDIO, DISCORD, MIC, APP_INPUTS[0], APP_INPUTS[1]];
 const NOISE_FILTER: &str = "Noise Suppression";
+const BOOST_FILTER: &str = "Boost";
+const LIMITER_FILTER: &str = "Limiter";
+/// Filters we own: removed from a source when no longer wanted.
+const MANAGED_FILTERS: [&str; 3] = [NOISE_FILTER, BOOST_FILTER, LIMITER_FILTER];
 
 pub struct InputSpec {
     pub name: &'static str,
@@ -31,6 +36,48 @@ pub struct InputSpec {
 
 fn rnnoise() -> (&'static str, &'static str, Value) {
     (NOISE_FILTER, "noise_suppress_filter_v2", json!({ "method": "rnnoise" }))
+}
+
+/// Mic chain: noise suppression → boost → limiter (so a big boost can't clip).
+fn mic_filters(a: &AudioSettings) -> Vec<(&'static str, &'static str, Value)> {
+    let mut f = vec![];
+    if a.mic_noise_suppression {
+        f.push(rnnoise());
+    }
+    if a.mic_boost_db > 0.05 {
+        f.push((BOOST_FILTER, "gain_filter", json!({ "db": a.mic_boost_db.clamp(0.0, 30.0) })));
+    }
+    f.push((LIMITER_FILTER, "limiter_filter", json!({ "threshold": -1.0, "release_time": 60 })));
+    f
+}
+
+/// Track numbers: Discord and extra apps are already part of "everything I
+/// hear", so in that mode they get their own track but stay out of the Mix.
+fn tracks(own: u8, a: &AudioSettings) -> &'static [u8] {
+    let desktop = a.game_mode == GameAudioMode::Desktop;
+    match (own, desktop) {
+        (3, false) => &[1, 3],
+        (3, true) => &[3],
+        (5, false) => &[1, 5],
+        (5, true) => &[5],
+        (6, false) => &[1, 6],
+        (6, true) => &[6],
+        _ => &[],
+    }
+}
+
+/// Names written into each clip's audio tracks (the editor shows them).
+pub fn track_names(a: &AudioSettings) -> Vec<(u8, String)> {
+    let mut v = vec![
+        (1, "Mix".to_string()),
+        (2, if a.game_mode == GameAudioMode::Desktop { "Desktop" } else { "Game" }.to_string()),
+        (3, "Discord".to_string()),
+        (4, "Mic".to_string()),
+    ];
+    for (i, app) in a.apps.iter().take(2).enumerate() {
+        v.push((5 + i as u8, app.name.clone()));
+    }
+    v
 }
 
 pub fn input_device_kind() -> &'static str {
@@ -80,7 +127,7 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             name: DISCORD,
             kind: "wasapi_process_output_capture",
             settings: json!({ "window": "Discord:Chrome_WidgetWin_1:Discord.exe", "priority": 2 }),
-            tracks: &[1, 3],
+            tracks: tracks(3, a),
             fit: false,
             volume: a.discord_volume,
             filters: vec![],
@@ -94,10 +141,42 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             tracks: &[1, 4],
             fit: false,
             volume: a.mic_volume,
-            filters: if a.mic_noise_suppression { vec![rnnoise()] } else { vec![] },
+            filters: mic_filters(a),
+        });
+    }
+    for (i, app) in a.apps.iter().take(2).enumerate() {
+        v.push(InputSpec {
+            name: APP_INPUTS[i],
+            kind: "wasapi_process_output_capture",
+            settings: json!({ "window": app.window, "priority": 2 }),
+            tracks: tracks(5 + i as u8, a),
+            fit: false,
+            volume: app_volume(a, i),
+            filters: vec![],
         });
     }
     v
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn app_volume(a: &AudioSettings, i: usize) -> f64 {
+    a.app_volumes.get(i).copied().unwrap_or(1.0)
+}
+
+/// Bitmask of the tracks in use (OBS only reads it when it starts).
+pub fn track_mask(a: &AudioSettings) -> u32 {
+    track_names(a).iter().map(|(n, _)| 1u32 << (n - 1)).sum()
+}
+
+/// Track names live in the profile; OBS writes them into every clip.
+pub async fn set_track_names(obs: &ObsClient, a: &AudioSettings) -> Result<()> {
+    for (n, name) in track_names(a) {
+        obs.call("SetProfileParameter", json!({
+            "parameterCategory": "AdvOut", "parameterName": format!("Track{n}Name"), "parameterValue": name,
+        }))
+        .await?;
+    }
+    Ok(())
 }
 
 /// Linux development stand-ins: looping test files instead of real capture,
@@ -122,7 +201,7 @@ pub fn specs(dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             name: DISCORD,
             kind: "ffmpeg_source",
             settings: media(file("dev-discord.m4a")),
-            tracks: &[1, 3],
+            tracks: tracks(3, a),
             fit: false,
             volume: a.discord_volume,
             filters: vec![],
@@ -136,7 +215,7 @@ pub fn specs(dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             tracks: &[1, 4],
             fit: false,
             volume: a.mic_volume,
-            filters: if a.mic_noise_suppression { vec![rnnoise()] } else { vec![] },
+            filters: mic_filters(a),
         });
     }
     v
@@ -238,18 +317,27 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
             .flatten()
             .filter_map(|f| f["filterName"].as_str().map(String::from))
             .collect();
-        for (fname, fkind, fsettings) in &spec.filters {
-            if !have.iter().any(|n| n == fname) {
+        for name in MANAGED_FILTERS {
+            if have.iter().any(|n| n == name) && !spec.filters.iter().any(|f| f.0 == name) {
+                obs.call("RemoveSourceFilter", json!({ "sourceName": spec.name, "filterName": name })).await?;
+            }
+        }
+        for (k, (fname, fkind, fsettings)) in spec.filters.iter().enumerate() {
+            if have.iter().any(|n| n == fname) {
+                obs.call("SetSourceFilterSettings", json!({
+                    "sourceName": spec.name, "filterName": fname, "filterSettings": fsettings, "overlay": true,
+                }))
+                .await?;
+            } else {
                 obs.call("CreateSourceFilter", json!({
                     "sourceName": spec.name, "filterName": fname,
                     "filterKind": fkind, "filterSettings": fsettings,
                 }))
                 .await?;
             }
-        }
-        if have.iter().any(|n| n == NOISE_FILTER) && !spec.filters.iter().any(|f| f.0 == NOISE_FILTER) {
-            obs.call("RemoveSourceFilter",
-                json!({ "sourceName": spec.name, "filterName": NOISE_FILTER })).await?;
+            // Keep the chain order: noise → boost → limiter.
+            let _ = obs.call("SetSourceFilterIndex",
+                json!({ "sourceName": spec.name, "filterName": fname, "filterIndex": k })).await;
         }
     }
     Ok(())

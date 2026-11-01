@@ -15,8 +15,9 @@
     <span class="spacer" data-tauri-drag-region></span>
     <span id="game" class="pill">No game</span>
     <span id="obs" class="pill">OBS: …</span>
-    <span id="buffer" class="pill">Buffer: off</span>
-    <button id="toggle">Start buffer</button>
+    <span id="buffer" class="pill">Clipping: off</span>
+    <button id="toggle" title="Keep the last minutes ready so you can save a clip">Start clipping</button>
+    <button id="record" title="Record until you press stop">● Record</button>
     <button id="save" class="primary">Save clip</button>
     <div class="winctl">
       <button id="win-min" title="Minimize"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
@@ -28,6 +29,7 @@
 
   <main id="view-clips" class="view">
     <div class="toolbar"><span id="clip-count"></span><span class="spacer"></span><button id="open-folder" class="small">Open folder</button></div>
+    <div id="folders" class="chips"></div>
     <div id="clips"></div>
   </main>
 
@@ -56,6 +58,14 @@
     <div id="ed-tracks"></div>
   </main>
 
+  <div id="picker" class="hidden">
+    <div class="picker-box">
+      <div class="player-head"><span id="picker-title">Choose an app</span><span class="spacer"></span><button id="picker-close">Cancel</button></div>
+      <p class="hint">Only apps with an open window are listed. Start the app first if it's missing.</p>
+      <div id="picker-list"></div>
+    </div>
+  </div>
+
   <div id="player" class="hidden">
     <div class="player-box">
       <div class="player-head"><span id="player-title"></span><span class="spacer"></span><button id="player-close">Close</button></div>
@@ -66,27 +76,39 @@
   <main id="view-settings" class="view hidden">
     <section class="card">
       <h2>Recording</h2>
-      <div class="row"><span>Clip key</span>
-        <button id="hotkey" title="Click, then press the new key combination">…</button></div>
-      <div class="row"><span>Buffer length</span>
+      <div class="row"><span>Save clip key</span>
+        <button id="hotkey" class="keybtn" data-which="clip" title="Click, then press the new key combination">…</button></div>
+      <div class="row"><span>Start/stop recording key</span>
+        <button id="record-hotkey" class="keybtn" data-which="record" title="Click, then press the new key combination">…</button></div>
+      <div class="row"><span>Clip length</span>
         <select id="buffer-len">
           <option value="30">30 seconds</option><option value="60">1 minute</option>
           <option value="90">1.5 minutes</option><option value="120">2 minutes</option>
           <option value="180">3 minutes</option><option value="240">4 minutes</option>
           <option value="300">5 minutes</option>
         </select></div>
+      <p class="hint">How far back a clip goes when you press the clip key.</p>
+      <div class="row"><span>Quality</span>
+        <select id="quality">
+          <option value="high">High (biggest files)</option>
+          <option value="balanced">Balanced (about half the size)</option>
+          <option value="small">Small files</option>
+        </select></div>
+      <p class="hint">Resolution stays the same; only the amount of data per second changes.</p>
+      <div class="row"><span>Screen to record (no game)</span><select id="screen-monitor"></select></div>
+      <p class="hint">Used by Record and by Start clipping when no game is running.</p>
     </section>
 
     <section class="card">
       <h2>Games</h2>
-      <p class="hint">The buffer only runs while one of these is open. Switch a game off to never record it.</p>
-      <input type="search" id="game-filter" placeholder="Filter games…">
+      <p class="hint">Clipping starts by itself while one of these is open. Switch a game off to never clip it, or add any other app.</p>
+      <div class="row"><input type="search" id="game-filter" placeholder="Filter games…"><button id="add-game">Add running app…</button></div>
       <div id="games"></div>
     </section>
 
     <section class="card">
       <h2>Audio <button id="refresh-devices" class="small">Refresh devices</button></h2>
-      <p class="hint">Every clip has separate tracks: Mix, Game, Discord and Mic. The editor uses them to change volumes afterwards.</p>
+      <p class="hint">Every clip has separate tracks (Mix, Game, Discord, Mic and your extra apps). The editor uses them to change volumes afterwards.</p>
 
       <h3>Game audio</h3>
       <div class="row"><span>Source</span>
@@ -97,17 +119,27 @@
         </select></div>
       <div class="row" id="row-desktop"><span>Output device</span><select id="a-desktop-device"></select></div>
       <div class="row"><span>Volume</span><input type="range" id="a-game-volume" min="0" max="300" step="5"><output></output></div>
+      <div class="row"><span>Level</span><div class="meter" data-inputs="Game Audio,Game Capture"><i></i></div></div>
 
       <h3>Discord</h3>
       <div class="row"><span>Record Discord</span><input type="checkbox" id="a-discord-enabled"></div>
       <div class="row"><span>Volume</span><input type="range" id="a-discord-volume" min="0" max="300" step="5"><output></output></div>
+      <div class="row"><span>Level</span><div class="meter" data-inputs="Discord"><i></i></div></div>
       <p class="hint">Discord is found through its window: if Discord is closed to the system tray, it can't be recorded.</p>
 
       <h3>Microphone</h3>
       <div class="row"><span>Record microphone</span><input type="checkbox" id="a-mic-enabled"></div>
       <div class="row"><span>Device</span><select id="a-mic-device"></select></div>
       <div class="row"><span>Volume</span><input type="range" id="a-mic-volume" min="0" max="300" step="5"><output></output></div>
+      <div class="row"><span>Boost</span><input type="range" id="a-mic-boost" min="0" max="30" step="1"><output></output></div>
+      <div class="row"><span>Level</span><div class="meter" data-inputs="Mic"><i></i></div></div>
+      <p class="hint">Talk normally: the level should reach the yellow part. Too quiet? Raise Boost. A limiter keeps it from clipping.</p>
       <div class="row"><span>Noise suppression</span><input type="checkbox" id="a-mic-noise"></div>
+
+      <h3>Other apps</h3>
+      <p class="hint">Record up to two more apps (music, browser…) on their own tracks.</p>
+      <div id="audio-apps"></div>
+      <div class="row"><span></span><button id="add-audio-app">Add app…</button></div>
     </section>
 
     <section class="card">

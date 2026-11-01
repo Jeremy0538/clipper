@@ -79,20 +79,34 @@ impl Hotkey {
     }
 }
 
+/// Which key: the clip key (only while clipping runs) or the record key (always).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Slot {
+    Clip = 0,
+    Record = 1,
+}
+
+impl Hotkey {
+    /// Default record key: Alt+F9 (like NVIDIA's).
+    pub fn default_record() -> Self {
+        Self { code: "F9".into(), shift: false, ctrl: false, alt: true }
+    }
+}
+
 // What the hook compares against (atomics: the hook callback can't lock).
 static ARMED: AtomicBool = AtomicBool::new(false);
-static VK: AtomicU32 = AtomicU32::new(0x46);
+static VK: [AtomicU32; 2] = [AtomicU32::new(0x46), AtomicU32::new(0x78)];
 /// Required modifiers: bit 0 shift, 1 ctrl, 2 alt.
-static MODS: AtomicU32 = AtomicU32::new(1);
+static MODS: [AtomicU32; 2] = [AtomicU32::new(1), AtomicU32::new(4)];
 
 pub fn set_armed(on: bool) {
     ARMED.store(on, Ordering::SeqCst);
 }
 
-pub fn apply(h: &Hotkey) -> Result<(), String> {
-    let vk = h.vk().ok_or_else(|| format!("{} can't be used as the clip key", h.code))?;
-    VK.store(vk, Ordering::SeqCst);
-    MODS.store(h.shift as u32 | (h.ctrl as u32) << 1 | (h.alt as u32) << 2, Ordering::SeqCst);
+pub fn apply(slot: Slot, h: &Hotkey) -> Result<(), String> {
+    let vk = h.vk().ok_or_else(|| format!("{} can't be used as a key", h.code))?;
+    VK[slot as usize].store(vk, Ordering::SeqCst);
+    MODS[slot as usize].store(h.shift as u32 | (h.ctrl as u32) << 1 | (h.alt as u32) << 2, Ordering::SeqCst);
     Ok(())
 }
 
@@ -110,8 +124,8 @@ pub fn start(app: tauri::AppHandle) {
         },
     };
 
-    static TX: OnceLock<mpsc::Sender<()>> = OnceLock::new();
-    static KEY_DOWN: AtomicBool = AtomicBool::new(false);
+    static TX: OnceLock<mpsc::Sender<Slot>> = OnceLock::new();
+    static KEY_DOWN: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
     unsafe fn held(vk: u16) -> bool {
         (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0
@@ -120,22 +134,27 @@ pub fn start(app: tauri::AppHandle) {
     unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if code == HC_ACTION as i32 {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
-            if k.vkCode == VK.load(Ordering::SeqCst) {
+            for slot in [Slot::Clip, Slot::Record] {
+                let i = slot as usize;
+                if k.vkCode != VK[i].load(Ordering::SeqCst) {
+                    continue;
+                }
                 let msg = wp.0 as u32;
                 if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
                     // Auto-repeat sends more key-downs: fire once per press.
-                    let first = !KEY_DOWN.swap(true, Ordering::SeqCst);
-                    let m = MODS.load(Ordering::SeqCst);
+                    let first = !KEY_DOWN[i].swap(true, Ordering::SeqCst);
+                    let m = MODS[i].load(Ordering::SeqCst);
                     let mods_ok = (m & 1 == 0 || held(VK_SHIFT.0))
                         && (m & 2 == 0 || held(VK_CONTROL.0))
                         && (m & 4 == 0 || held(VK_MENU.0));
-                    if first && mods_ok && ARMED.load(Ordering::SeqCst) {
+                    let armed = slot == Slot::Record || ARMED.load(Ordering::SeqCst);
+                    if first && mods_ok && armed {
                         if let Some(tx) = TX.get() {
-                            let _ = tx.send(());
+                            let _ = tx.send(slot);
                         }
                     }
                 } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
-                    KEY_DOWN.store(false, Ordering::SeqCst);
+                    KEY_DOWN[i].store(false, Ordering::SeqCst);
                 }
             }
         }
@@ -143,7 +162,7 @@ pub fn start(app: tauri::AppHandle) {
         CallNextHookEx(None, code, wp, lp)
     }
 
-    let (tx, rx) = mpsc::channel::<()>();
+    let (tx, rx) = mpsc::channel::<Slot>();
     let _ = TX.set(tx);
 
     // The hook needs a thread with a message loop; keep the callback tiny.
@@ -158,12 +177,24 @@ pub fn start(app: tauri::AppHandle) {
         }
     });
     std::thread::spawn(move || {
-        for () in rx {
-            crate::clog!("clip key pressed");
+        for slot in rx {
             let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = crate::save_clip_inner(&app).await; // errors are reported inside
-            });
+            match slot {
+                Slot::Clip => {
+                    crate::clog!("clip key pressed");
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::save_clip_inner(&app).await; // errors are reported inside
+                    });
+                }
+                Slot::Record => {
+                    crate::clog!("record key pressed");
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::modes::toggle_recording(&app).await {
+                            crate::report_error(&app, format!("Recording: {e}"));
+                        }
+                    });
+                }
+            }
         }
     });
 }
