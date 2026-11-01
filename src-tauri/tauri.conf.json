@@ -3,20 +3,44 @@
   "productName": "Clipper",
   "version": "0.1.6",
   "identifier": "nl.jeremyklootwijk.clipper",
-  "build": { "frontendDist": "../ui" },
+  "build": {
+    "frontendDist": "../ui"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "Clipper", "width": 1100, "height": 720, "visible": false }
+      {
+        "label": "main",
+        "title": "Clipper",
+        "width": 1100,
+        "height": 720,
+        "visible": false,
+        "decorations": false,
+        "shadow": true,
+        "minWidth": 760,
+        "minHeight": 480
+      }
     ],
     "security": {
       "csp": null,
-      "assetProtocol": { "enable": true, "scope": ["**"] }
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico", "icons/icon.png"]
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
   }
 }

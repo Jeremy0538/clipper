@@ -158,6 +158,12 @@ for (const name of ["sound", "toast", "autostart", "test_builds"]) {
 }
 $("logs").onclick = () => invoke("open_log_folder").catch(say);
 
+// ---------- window frame ----------
+const win = window.__TAURI__.window.getCurrentWindow();
+$("win-min").onclick = () => win.minimize();
+$("win-max").onclick = () => win.toggleMaximize();
+$("win-close").onclick = () => win.close();   // the app hides to the tray
+
 // ---------- appearance ----------
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;

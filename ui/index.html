@@ -6,18 +6,23 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <h1>Clipper</h1>
+  <header data-tauri-drag-region>
+    <h1 data-tauri-drag-region>Clipper</h1>
     <nav>
       <button class="tab active" data-view="clips">Clips</button>
       <button class="tab" data-view="settings">Settings</button>
     </nav>
-    <span class="spacer"></span>
+    <span class="spacer" data-tauri-drag-region></span>
     <span id="game" class="pill">No game</span>
     <span id="obs" class="pill">OBS: …</span>
     <span id="buffer" class="pill">Buffer: off</span>
     <button id="toggle">Start buffer</button>
     <button id="save" class="primary">Save clip</button>
+    <div class="winctl">
+      <button id="win-min" title="Minimize"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
+      <button id="win-max" title="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"/></svg></button>
+      <button id="win-close" class="close" title="Close to tray"><svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
+    </div>
   </header>
   <p id="msg"></p>
 
