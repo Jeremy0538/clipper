@@ -103,8 +103,13 @@ impl ObsManager {
             cmd.env("XDG_CONFIG_HOME", x);
         }
         report("starting".into());
+        self.kill_orphans().await;
         let mut child = cmd.spawn()?;
         *self.pid.lock().unwrap() = child.id();
+        #[cfg(windows)]
+        if let Some(pid) = child.id() {
+            tie_to_clipper(pid);
+        }
 
         let t0 = Instant::now();
         loop {
@@ -121,14 +126,26 @@ impl ObsManager {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
+        // The websocket opens before OBS has finished loading ("not ready",
+        // code 207): keep trying. If it never works, restart OBS rather than
+        // leaving a half-set-up one running.
         let specs = setup::specs(&self.data_dir, &settings.audio);
-        if let Err(e) =
-            setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await
-        {
-            report(format!("error: scene setup: {e:#}"));
-        } else {
-            report("ready".into());
+        let t0 = Instant::now();
+        loop {
+            match setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await {
+                Ok(()) => break,
+                Err(e) if t0.elapsed() < Duration::from_secs(60) => {
+                    crate::clog!("scene setup not done yet: {e:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    bail!("scene setup failed: {e:#}");
+                }
+            }
         }
+        report("ready".into());
 
         let status = child.wait().await?;
         *self.pid.lock().unwrap() = None;
@@ -143,6 +160,37 @@ impl ObsManager {
         let s = self.settings.lock().unwrap().clone();
         let specs = setup::specs(&self.data_dir, &s.audio);
         setup::ensure_scene(&self.client, &specs, s.width, s.height).await
+    }
+
+    /// An OBS left over from an earlier Clipper (crash, killed in Task Manager)
+    /// would fight the new one for the websocket port and the game-capture hook
+    /// (black clips). Only OBS processes started from Clipper's own copy are hit.
+    async fn kill_orphans(&self) {
+        if !cfg!(windows) {
+            return;
+        }
+        let exe = self.paths.exe.to_string_lossy().to_lowercase();
+        let killed = tokio::task::spawn_blocking(move || {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
+            );
+            let mut n = 0;
+            for p in sys.processes().values() {
+                if p.exe().is_some_and(|e| e.to_string_lossy().to_lowercase() == exe) && p.kill() {
+                    n += 1;
+                }
+            }
+            n
+        })
+        .await
+        .unwrap_or(0);
+        if killed > 0 {
+            crate::clog!("closed {killed} leftover OBS process(es)");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     /// Stop OBS for good (app is quitting). Gentle first, forced after a few seconds.
@@ -172,6 +220,57 @@ impl ObsManager {
                 }
             }
             let _ = std::process::Command::new("kill").args(["-KILL", &pid]).status();
+        }
+    }
+}
+
+/// Put OBS in a job object that is killed when Clipper's last handle closes:
+/// if Clipper crashes or is ended in Task Manager, Windows closes OBS too.
+#[cfg(windows)]
+fn tie_to_clipper(pid: u32) {
+    use std::sync::OnceLock;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{CloseHandle, HANDLE},
+            System::{
+                JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                },
+                Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE},
+            },
+        },
+    };
+    // One job for the app's lifetime; its handle is deliberately never closed.
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .ok()?;
+        Some(job.0 as isize)
+    });
+    let Some(job) = *job else {
+        crate::clog!("ERROR could not create the OBS job object");
+        return;
+    };
+    unsafe {
+        match OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) {
+            Ok(h) => {
+                if let Err(e) = AssignProcessToJobObject(HANDLE(job as *mut _), h) {
+                    crate::clog!("ERROR could not tie OBS to Clipper: {e}");
+                }
+                let _ = CloseHandle(h);
+            }
+            Err(e) => crate::clog!("ERROR could not open OBS process: {e}"),
         }
     }
 }
