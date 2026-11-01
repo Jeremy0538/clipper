@@ -21,6 +21,7 @@ pub struct ClipInfo {
 fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
+        .filter(|c| !"™®©".contains(*c))
         .map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { ' ' } else { c })
         .collect();
     let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -1,10 +1,18 @@
+mod autobuffer;
 mod clips;
+mod games;
 mod obs;
 
 use obs::{config::Settings, ws::DISCONNECTED, ObsManager};
 use serde::Serialize;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -24,9 +32,13 @@ pub struct AppState {
     pub obs: Arc<ObsManager>,
     pub clips_dir: PathBuf,
     pub status: Mutex<Status>,
+    /// Bumped every time OBS (re)starts and is ready; inputs must be retargeted.
+    pub obs_session: AtomicU64,
+    /// The user stopped the buffer by hand during this game: don't auto-restart it.
+    pub user_stopped: AtomicBool,
 }
 
-async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
+pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
     let st = app.state::<AppState>();
     let mut s = st.status.lock().await;
     f(&mut s);
@@ -57,12 +69,14 @@ async fn get_status(state: tauri::State<'_, AppState>) -> Result<Status, String>
 
 #[tauri::command]
 async fn start_buffer(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.user_stopped.store(false, Ordering::SeqCst);
     state.obs.client.call("StartReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_buffer(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.user_stopped.store(true, Ordering::SeqCst);
     state.obs.client.call("StopReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -157,8 +171,22 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&clips_dir)?;
 
-            let obs = ObsManager::new(data_dir, Settings::default())?;
-            app.manage(AppState { obs: obs.clone(), clips_dir, status: Mutex::default() });
+            #[allow(unused_mut)]
+            let mut settings = Settings::default();
+            // Canvas = primary monitor (games run there); even sizes for the encoder.
+            #[cfg(windows)]
+            if let Ok(Some(m)) = app.primary_monitor() {
+                settings.width = m.size().width & !1;
+                settings.height = m.size().height & !1;
+            }
+            let obs = ObsManager::new(data_dir, settings)?;
+            app.manage(AppState {
+                obs: obs.clone(),
+                clips_dir,
+                status: Mutex::default(),
+                obs_session: AtomicU64::new(0),
+                user_stopped: AtomicBool::new(false),
+            });
 
             // Tray
             let open = MenuItem::with_id(app, "open", "Open Clipper", true, None::<&str>)?;
@@ -205,11 +233,15 @@ pub fn run() {
             let h = handle.clone();
             tauri::async_runtime::spawn(obs.run(move |state| {
                 let h = h.clone();
+                if state == "ready" {
+                    h.state::<AppState>().obs_session.fetch_add(1, Ordering::SeqCst);
+                }
                 tauri::async_runtime::spawn(async move {
                     set_status(&h, |s| s.obs = state).await;
                 });
             }));
             tauri::async_runtime::spawn(watch_events(handle.clone()));
+            tauri::async_runtime::spawn(autobuffer::run(handle.clone()));
 
             if !start_hidden {
                 show_main(&handle);
