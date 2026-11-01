@@ -13,9 +13,6 @@
       <button class="tab" data-view="settings">Settings</button>
     </nav>
     <span class="spacer" data-tauri-drag-region></span>
-    <span id="game" class="pill">No game</span>
-    <span id="obs" class="pill">OBS: …</span>
-    <span id="buffer" class="pill">Clipping: off</span>
     <button id="toggle" title="Keep the last minutes ready so you can save a clip">Start clipping</button>
     <button id="record" title="Record until you press stop">● Record</button>
     <button id="save" class="primary">Save clip</button>
@@ -25,7 +22,12 @@
       <button id="win-close" class="close" title="Close to tray"><svg viewBox="0 0 10 10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
     </div>
   </header>
-  <p id="msg"></p>
+  <div id="statusbar">
+    <span id="game" class="pill">No game</span>
+    <span id="obs" class="pill">OBS: …</span>
+    <span id="buffer" class="pill">Clipping: off</span>
+    <span id="msg"></span>
+  </div>
 
   <main id="view-clips" class="view">
     <div class="toolbar"><span id="clip-count"></span><span class="spacer"></span><button id="open-folder" class="small">Open folder</button></div>

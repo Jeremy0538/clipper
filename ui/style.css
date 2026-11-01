@@ -1,23 +1,23 @@
 :root, :root[data-theme="light"] {
   color-scheme: light;
-  --bg:#f3f3f3; --card:#fbfbfb; --fg:#1b1b1b; --dim:#5f5f5f; --line:#e5e5e5; --ctl:#ffffff; --ctl-border:#d6d6d6;
-  --accent:#005fb8; --on-accent:#ffffff; --ok:#0f7b0f; --on-ok:#ffffff; --danger:#c42b1c; --header:#ebebeb;
+  --bg:#eef0f3; --card:#ffffff; --fg:#141414; --dim:#555b63; --line:#d9dde3; --ctl:#ffffff; --ctl-border:#b9c0c9;
+  --accent:#005fb8; --on-accent:#ffffff; --ok:#0f7b0f; --on-ok:#ffffff; --danger:#c42b1c; --header:#ffffff; --track:#c9ced6;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg:#202020; --card:#2b2b2b; --fg:#ffffff; --dim:#c5c5c5; --line:#3a3a3a; --ctl:#373737; --ctl-border:#454545;
-  --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#1c1c1c;
+  --bg:#1c1c1c; --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444; --ctl:#383838; --ctl-border:#5c5c5c;
+  --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#161616; --track:#555555;
 }
 :root[data-theme="oled"] {
   color-scheme: dark;
-  --bg:#000000; --card:#0b0b0b; --fg:#f2f2f2; --dim:#a8a8a8; --line:#1c1c1c; --ctl:#141414; --ctl-border:#262626;
-  --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#000000;
+  --bg:#000000; --card:#0e0e0e; --fg:#ffffff; --dim:#b0b0b0; --line:#2f2f2f; --ctl:#161616; --ctl-border:#454545;
+  --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#000000; --track:#3d3d3d;
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
     color-scheme: dark;
-    --bg:#202020; --card:#2b2b2b; --fg:#ffffff; --dim:#c5c5c5; --line:#3a3a3a; --ctl:#373737; --ctl-border:#454545;
-    --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#1c1c1c;
+    --bg:#1c1c1c; --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444; --ctl:#383838; --ctl-border:#5c5c5c;
+    --accent:#60cdff; --on-accent:#000000; --ok:#6ccb5f; --on-ok:#000000; --danger:#ff99a4; --header:#161616; --track:#555555;
   }
 }
 * { box-sizing: border-box; }
@@ -111,3 +111,28 @@ button.small { padding:4px 10px; font-size:12px; font-weight:400; }
 #games .remove { padding:2px 8px; font-size:12px; }
 #audio-apps .row output { width:48px; }
 #game-filter { margin:0; flex:1; }
+
+/* ---- readability pass: labels in full colour, hints dim, clear structure ---- */
+h1 { font-size:19px; letter-spacing:-.01em; }
+.card h2 { font-size:16px; margin-bottom:12px; }
+.card h3 { color:var(--fg); opacity:.8; border-top:1px solid var(--line); padding-top:14px; }
+.card h2 + .hint + h3, .card h2 + h3 { border-top:0; padding-top:0; }
+.row > span:first-child { color:var(--fg); font-weight:500; }
+.hint { font-size:12.5px; line-height:1.45; }
+button:disabled { opacity:.4; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.tab { font-weight:500; }
+.tab.active { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.pill { font-weight:600; border:1px solid var(--ctl-border); }
+.pill.on, .pill.bad { border-color:transparent; }
+.meter { background:var(--track); height:10px; }
+input[type=range] { accent-color:var(--accent); }
+.clip { box-shadow:0 1px 3px rgba(0,0,0,.12); }
+.clip .name { font-weight:600; }
+#games label { border-bottom-color:var(--line); }
+#msg { color:var(--fg); opacity:.85; }
+#statusbar { flex:none; display:flex; align-items:center; gap:8px; padding:8px 18px; border-bottom:1px solid var(--line); background:var(--bg); min-width:0; }
+#statusbar #msg { margin:0; min-height:0; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; }
+#statusbar .pill { max-width:240px; }
+#view-clips { padding-top:12px; }
+#view-settings { padding-top:14px; }
