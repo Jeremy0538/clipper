@@ -38,6 +38,13 @@
     </section>
 
     <section class="card">
+      <h2>Games</h2>
+      <p class="hint">The buffer only runs while one of these is open. Switch a game off to never record it.</p>
+      <input type="search" id="game-filter" placeholder="Filter games…">
+      <div id="games"></div>
+    </section>
+
+    <section class="card">
       <h2>Audio <button id="refresh-devices" class="small">Refresh devices</button></h2>
       <p class="hint">Every clip has separate tracks: Mix, Game, Discord and Mic. The editor uses them to change volumes afterwards.</p>
 
@@ -67,6 +74,11 @@
       <h2>Notifications</h2>
       <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="opt-sound"></div>
       <div class="row"><span>Debug pop-ups</span><input type="checkbox" id="opt-toast"></div>
+    </section>
+
+    <section class="card">
+      <h2>Startup</h2>
+      <div class="row"><span>Start with Windows (in the tray)</span><input type="checkbox" id="opt-autostart"></div>
     </section>
 
     <section class="card">

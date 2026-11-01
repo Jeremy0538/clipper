@@ -17,6 +17,10 @@ pub struct UserSettings {
     /// Small corner pop-ups (clip saved, game detected, errors) — debug aid.
     pub toast: bool,
     pub audio: AudioSettings,
+    /// Games the user switched off: no buffer while they run.
+    pub disabled_games: Vec<String>,
+    /// Start hidden in the tray when Windows starts.
+    pub autostart: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -64,7 +68,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default() }
+        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], autostart: true }
     }
 }
 

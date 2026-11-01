@@ -21,9 +21,10 @@ pub async fn run(app: AppHandle) {
     loop {
         tokio::time::sleep(TICK).await;
         let d = det.take().unwrap();
+        let disabled = app.state::<AppState>().user.lock().await.disabled_games.clone();
         let Ok((d, found)) = tokio::task::spawn_blocking(move || {
             let mut d = d;
-            let g = d.detect();
+            let g = d.detect(&disabled);
             (d, g)
         })
         .await

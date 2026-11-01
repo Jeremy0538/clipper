@@ -77,6 +77,16 @@ fn library_paths() -> Vec<PathBuf> {
     libs
 }
 
+/// Every game Clipper can record on this PC (installed Steam games + Minecraft),
+/// sorted by name.
+pub fn installed_games() -> Vec<String> {
+    let mut names: Vec<String> = index_steam().into_iter().map(|g| g.name).collect();
+    names.push("Minecraft".into());
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
 fn index_steam() -> Vec<SteamGame> {
     let mut games = vec![];
     for lib in library_paths() {
@@ -124,7 +134,8 @@ impl Detector {
     }
 
     /// One scan of the process list.
-    pub fn detect(&mut self) -> Option<Game> {
+    /// `disabled`: game names the user switched off (case-insensitive).
+    pub fn detect(&mut self, disabled: &[String]) -> Option<Game> {
         if self.indexed.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
             self.steam = index_steam();
             self.indexed = Some(Instant::now());
@@ -158,7 +169,9 @@ impl Detector {
                 if cfg!(windows) { self.steam_name(&[exe]) } else { self.steam_name(&[exe, cmd]) }
             };
             if let Some(n) = name {
-                candidates.push((n.to_string(), pid.as_u32()));
+                if !disabled.iter().any(|d| d.eq_ignore_ascii_case(n)) {
+                    candidates.push((n.to_string(), pid.as_u32()));
+                }
             }
         }
         candidates.sort_by_key(|c| c.1);
@@ -301,6 +314,6 @@ mod tests {
         for g in &games {
             println!("steam: {} -> {}", g.name, g.dir);
         }
-        println!("running: {:?}", Detector::new().detect());
+        println!("running: {:?}", Detector::new().detect(&[]));
     }
 }

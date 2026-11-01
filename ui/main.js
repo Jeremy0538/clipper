@@ -11,7 +11,7 @@ for (const tab of document.querySelectorAll(".tab")) {
   tab.onclick = () => {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + tab.dataset.view));
-    if (tab.dataset.view === "settings") loadDevices();
+    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); }
   };
 }
 
@@ -69,6 +69,7 @@ async function loadSettings() {
   sel.value = String(settings.buffer_secs);
   $("opt-sound").checked = settings.sound;
   $("opt-toast").checked = settings.toast;
+  $("opt-autostart").checked = settings.autostart;
   showAudio(settings.audio);
 }
 
@@ -98,10 +99,32 @@ $("buffer-len").onchange = async (e) => {
     say(status.buffer ? "Buffer length changed (the buffer restarted)." : "Buffer length saved.");
   } catch (err) { say(err); }
 };
-for (const name of ["sound", "toast"]) {
+for (const name of ["sound", "toast", "autostart"]) {
   $("opt-" + name).onchange = (e) => invoke("set_option", { name, value: e.target.checked }).catch(say);
 }
 $("logs").onclick = () => invoke("open_log_folder").catch(say);
+
+// ---------- settings: games ----------
+let games = [];
+async function loadGames() {
+  try { games = await invoke("list_games"); renderGames(); } catch (err) { say(err); }
+}
+function renderGames() {
+  const f = $("game-filter").value.trim().toLowerCase();
+  $("games").replaceChildren(...games.filter((g) => g.name.toLowerCase().includes(f)).map((g) => {
+    const l = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = g.enabled;
+    cb.onchange = () => {
+      g.enabled = cb.checked;
+      invoke("set_game_enabled", { name: g.name, enabled: cb.checked }).catch(say);
+    };
+    l.append(cb, document.createTextNode(g.name));
+    return l;
+  }));
+}
+$("game-filter").oninput = renderGames;
 
 // ---------- settings: audio ----------
 const VOLUMES = { "a-game-volume": "game_volume", "a-discord-volume": "discord_volume", "a-mic-volume": "mic_volume" };

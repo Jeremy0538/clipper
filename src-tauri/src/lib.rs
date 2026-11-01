@@ -1,4 +1,5 @@
 mod autobuffer;
+mod autostart;
 mod clips;
 mod games;
 mod hotkey;
@@ -50,6 +51,24 @@ pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
     let mut s = st.status.lock().await;
     f(&mut s);
     let _ = app.emit("status", s.clone());
+    update_tray(app, &s);
+}
+
+/// Green tray icon while the buffer runs, tooltip with the state.
+fn update_tray(app: &AppHandle, s: &Status) {
+    static ICON_IDLE: &[u8] = include_bytes!("../icons/32x32.png");
+    static ICON_REC: &[u8] = include_bytes!("../icons/tray-recording.png");
+    let Some(tray) = app.tray_by_id("tray") else { return };
+    let tip = match (&s.game, s.buffer) {
+        (Some(g), true) => format!("Clipper: recording {g}"),
+        (_, true) => "Clipper: recording".to_string(),
+        _ if s.obs != "ready" => format!("Clipper: OBS {}", s.obs),
+        _ => "Clipper: waiting for a game".to_string(),
+    };
+    let _ = tray.set_tooltip(Some(&tip));
+    if let Ok(img) = tauri::image::Image::from_bytes(if s.buffer { ICON_REC } else { ICON_IDLE }) {
+        let _ = tray.set_icon(Some(img));
+    }
 }
 
 fn show_main(app: &AppHandle) {
@@ -69,6 +88,16 @@ pub(crate) fn report_error(app: &AppHandle, msg: impl Into<String>) {
 }
 
 pub(crate) async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
+    // A second press within 2 s would save (almost) the same clip twice.
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+            clog!("save ignored (pressed again within 2 s)");
+            return Ok(());
+        }
+        *last = Some(std::time::Instant::now());
+    }
     clog!("save requested");
     let st = app.state::<AppState>();
     let r = async {
@@ -117,6 +146,7 @@ struct SettingsView {
     max_buffer_secs: u32,
     sound: bool,
     toast: bool,
+    autostart: bool,
     audio: AudioSettings,
 }
 
@@ -130,6 +160,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         max_buffer_secs: MAX_BUFFER_SECS,
         sound: u.sound,
         toast: u.toast,
+        autostart: u.autostart,
         audio: u.audio.clone(),
     })
 }
@@ -192,6 +223,10 @@ async fn set_option(state: tauri::State<'_, AppState>, name: String, value: bool
     match name.as_str() {
         "sound" => u.sound = value,
         "toast" => u.toast = value,
+        "autostart" => {
+            u.autostart = value;
+            autostart::apply(value);
+        }
         _ => return Err(format!("unknown option {name}")),
     }
     clog!("option {name} = {value}");
@@ -220,6 +255,38 @@ async fn list_audio_devices(state: tauri::State<'_, AppState>, output: bool)
     -> Result<Vec<obs::setup::Device>, String>
 {
     obs::setup::list_devices(&state.obs.client, output).await.map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Serialize)]
+struct GameEntry {
+    name: String,
+    enabled: bool,
+}
+
+#[tauri::command]
+async fn list_games(state: tauri::State<'_, AppState>) -> Result<Vec<GameEntry>, String> {
+    let names = tauri::async_runtime::spawn_blocking(games::installed_games)
+        .await
+        .map_err(|e| e.to_string())?;
+    let u = state.user.lock().await;
+    Ok(names
+        .into_iter()
+        .map(|name| GameEntry {
+            enabled: !u.disabled_games.iter().any(|d| d.eq_ignore_ascii_case(&name)),
+            name,
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn set_game_enabled(state: tauri::State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.disabled_games.retain(|d| !d.eq_ignore_ascii_case(&name));
+    if !enabled {
+        u.disabled_games.push(name.clone());
+    }
+    clog!("game {name}: {}", if enabled { "on" } else { "off" });
+    u.save(&state.settings_file).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -292,7 +359,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
             set_buffer, set_option, open_log_folder, set_audio,
-            list_audio_devices
+            list_audio_devices, list_games, set_game_enabled
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -311,6 +378,7 @@ pub fn run() {
 
             let settings_file = data_dir.join("settings.json");
             let user = UserSettings::load(&settings_file);
+            autostart::apply(user.autostart);
             hotkey::apply(&user.hotkey)?;
             hotkey::start(handle.clone());
             #[allow(unused_mut)]
