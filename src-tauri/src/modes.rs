@@ -30,13 +30,13 @@ pub async fn enter_screen(app: &AppHandle) -> Result<(), String> {
     }
     let obs = &st.obs.client;
     let choice = st.user.lock().await.screen_monitor.clone();
-    let audio = screen::audio_inputs(obs).await;
-    let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
-    let (w, h) = screen::prepare(obs, &choice, &audio).await.map_err(|e| format!("{e:#}"))?;
     if !outputs_idle(app).await {
         return Err("Stop clipping first".into());
     }
-    screen::set_canvas(obs, w, h).await.map_err(|e| format!("{e:#}"))?;
+    let audio = screen::audio_inputs(obs).await;
+    let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
+    let cam = st.obs.settings.lock().unwrap().webcam.clone();
+    let (w, h) = screen::prepare(obs, &choice, &audio, &cam).await.map_err(|e| format!("{e:#}"))?;
     screen::use_scene(obs, screen::SCREEN_SCENE).await.map_err(|e| format!("{e:#}"))?;
     st.screen.store(true, Ordering::SeqCst);
     clog!("screen mode ({choice}, {w}x{h})");
@@ -58,6 +58,10 @@ pub async fn leave_screen(app: &AppHandle) -> Result<(), String> {
         (s.width, s.height)
     };
     screen::set_canvas(obs, w, h).await.map_err(|e| format!("{e:#}"))?;
+    // The canvas changes rescaled the game scene too: put it back in place.
+    if let Err(e) = st.obs.apply_audio().await {
+        clog!("refit game scene: {e:#}");
+    }
     screen::use_scene(obs, SCENE).await.map_err(|e| format!("{e:#}"))?;
     st.screen.store(false, Ordering::SeqCst);
     clog!("game mode");

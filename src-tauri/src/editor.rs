@@ -383,3 +383,95 @@ mod fit_tests {
         println!("fit {} -> {:.2} MB", p.display(), std::fs::metadata(&p).unwrap().len() as f64 / 1e6);
     }
 }
+
+/// Put clips after each other in one video (in the given order). Every part is
+/// scaled to the first clip's size; only the Mix track is kept (clips can have
+/// different source tracks).
+pub async fn combine(tools: &Tools, out_dir: &Path, paths: &[PathBuf], progress: impl Fn(u32)) -> Result<PathBuf> {
+    anyhow::ensure!(paths.len() >= 2, "Pick at least two clips");
+    let mut lens = vec![];
+    let (mut w, mut h) = (0u32, 0u32);
+    for (i, p) in paths.iter().enumerate() {
+        let mut c = command(&tools.ffprobe);
+        c.args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height", "-of", "json"]).arg(p);
+        let v: serde_json::Value = serde_json::from_slice(&run(c).await?.stdout)?;
+        let d: f64 = v["format"]["duration"].as_str().and_then(|d| d.parse().ok()).context("no duration")?;
+        let streams = v["streams"].as_array().cloned().unwrap_or_default();
+        anyhow::ensure!(streams.iter().any(|s| s["codec_type"] == "audio"),
+            "{} has no sound track", p.file_name().unwrap_or_default().to_string_lossy());
+        if i == 0 {
+            let vs = streams.iter().find(|s| s["codec_type"] == "video").context("no video")?;
+            w = vs["width"].as_u64().unwrap_or(1920) as u32 & !1;
+            h = vs["height"].as_u64().unwrap_or(1080) as u32 & !1;
+        }
+        lens.push(d);
+    }
+    let total: f64 = lens.iter().sum();
+    let first = paths[0].file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
+    let out = out_dir.join(format!("{} (combined) {stamp}.mp4", base_name(&first)));
+    let part = out.with_extension("part.mp4");
+
+    let mut graph = String::new();
+    for i in 0..paths.len() {
+        graph += &format!(
+            "[{i}:v:0]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=60,format=yuv420p[v{i}];\
+             [{i}:a:0]aformat=sample_rates=48000:channel_layouts=stereo[a{i}];"
+        );
+    }
+    for i in 0..paths.len() {
+        graph += &format!("[v{i}][a{i}]");
+    }
+    graph += &format!("concat=n={}:v=1:a=1[v][a]", paths.len());
+
+    let gpu = crate::gpu::detect().ffmpeg_encoder();
+    let encoders: Vec<&'static str> = if gpu == "libx264" { vec!["libx264"] } else { vec![gpu, "libx264"] };
+    let mut last_err = String::new();
+    for encoder in encoders {
+        let mut c = command(&tools.ffmpeg);
+        c.args(["-hide_banner", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]);
+        for p in paths {
+            c.args(["-hwaccel", "auto", "-i"]).arg(p);
+        }
+        c.args(["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"]);
+        match encoder {
+            "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]),
+            "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23", "-g", "60"]),
+            "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]),
+            _ => c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]),
+        };
+        c.args(["-c:a", "aac", "-b:a", "192k", "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix",
+                "-movflags", "+faststart", "-f", "mp4"]).arg(&part);
+        let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        while let Some(l) = lines.next_line().await? {
+            if let Some(us) = l.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
+                progress(((us / 1e6 / total) * 100.0).clamp(0.0, 99.0) as u32);
+            }
+        }
+        let output = child.wait_with_output().await?;
+        if output.status.success() {
+            std::fs::rename(&part, &out)?;
+            progress(100);
+            return Ok(out);
+        }
+        last_err = String::from_utf8_lossy(&output.stderr).lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        crate::clog!("combine with {encoder} failed: {last_err}");
+        let _ = std::fs::remove_file(&part);
+    }
+    bail!("combining failed: {last_err}")
+}
+
+#[cfg(test)]
+mod combine_tests {
+    /// cargo test editor_combine -- --ignored --nocapture  (CLIPPER_TEST_CLIPS = a|b|c, CLIPPER_TEST_OUT)
+    #[tokio::test]
+    #[ignore]
+    async fn editor_combine() {
+        let clips: Vec<std::path::PathBuf> = std::env::var("CLIPPER_TEST_CLIPS").unwrap().split('|').map(Into::into).collect();
+        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
+        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
+        let p = super::combine(&tools, &out, &clips, |_| {}).await.unwrap();
+        println!("combined {}", p.display());
+    }
+}

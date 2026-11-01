@@ -289,6 +289,7 @@ struct SettingsView {
     quality: String,
     version: String,
     audio: AudioSettings,
+    webcam: settings::WebcamSettings,
 }
 
 #[tauri::command]
@@ -311,6 +312,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         quality: u.quality.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
+        webcam: u.webcam.clone(),
     })
 }
 
@@ -434,6 +436,36 @@ async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> R
         state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
         // Make the game detector point Game Audio at the game again.
         state.obs_session.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_cameras(state: tauri::State<'_, AppState>) -> Result<Vec<obs::setup::Device>, String> {
+    obs::setup::list_cameras(&state.obs.client).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn set_webcam(app: AppHandle, webcam: settings::WebcamSettings) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    {
+        let mut u = st.user.lock().await;
+        u.webcam = webcam.clone();
+        u.save(&st.settings_file).map_err(|e| e.to_string())?;
+    }
+    clog!("webcam: {webcam:?}");
+    st.obs.settings.lock().unwrap().webcam = webcam;
+    if !st.obs.client.is_connected().await {
+        return Ok(());
+    }
+    st.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
+    // Screen mode: rebuild that scene too so the camera shows up / moves there.
+    if st.screen.load(Ordering::SeqCst) {
+        let cam = st.obs.settings.lock().unwrap().webcam.clone();
+        let canvas = st.obs.client.call("GetVideoSettings", json!({})).await.map_err(|e| e.to_string())?;
+        let (w, h) = (canvas["baseWidth"].as_u64().unwrap_or(1920) as u32, canvas["baseHeight"].as_u64().unwrap_or(1080) as u32);
+        let _ = st.obs.client.call("CreateSceneItem", json!({ "sceneName": screen::SCREEN_SCENE, "sourceName": obs::setup::WEBCAM })).await;
+        let _ = obs::setup::place_webcam(&st.obs.client, screen::SCREEN_SCENE, w, h, &cam).await;
     }
     Ok(())
 }
@@ -682,6 +714,25 @@ async fn editor_track(state: tauri::State<'_, AppState>, index: usize) -> Result
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Clips in the given order → one video, saved next to the first one.
+#[tauri::command]
+async fn combine_clips(app: AppHandle, paths: Vec<String>) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let ps = paths.iter().map(|p| clips::checked(&st.clips_dir, p)).collect::<Result<Vec<_>, _>>()?;
+    let tools = tools_for(&app).await?;
+    let dir = ps[0].parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir.clone());
+    clog!("combine {} clips", ps.len());
+    let h = app.clone();
+    let out = editor::combine(&tools, &dir, &ps, move |p| { let _ = h.emit("combine-progress", p); })
+        .await
+        .map_err(|e| { clog!("ERROR combine: {e:#}"); format!("{e:#}") })?;
+    clog!("combined: {}", out.display());
+    notify::toast(&app, true, "Clips combined", out.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    let _ = app.emit("clip-saved", out.to_string_lossy());
+    after_new_file(&app).await;
+    Ok(out.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 async fn editor_close(state: tauri::State<'_, AppState>) -> Result<(), String> {
     *state.editor.lock().await = None;
@@ -833,7 +884,7 @@ pub fn run() {
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
-            screenshot, rename_clip, set_favorite, set_storage_limit
+            screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, list_cameras, set_webcam
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -864,6 +915,7 @@ pub fn run() {
             let mut settings = Settings {
                 buffer_secs: user.buffer_secs,
                 audio: user.audio.clone(),
+                webcam: user.webcam.clone(),
                 quality: user.quality.clone(),
                 ..Settings::default()
             };

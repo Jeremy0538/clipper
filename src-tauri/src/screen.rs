@@ -80,7 +80,7 @@ fn pick<'a>(monitors: &'a [Monitor], choice: &str) -> Vec<&'a Monitor> {
 /// Build the Screen scene for `choice` and switch to it. Returns the canvas size
 /// it needs; the caller changes the video settings (only allowed while no
 /// output runs).
-pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Result<(u32, u32)> {
+pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str], cam: &crate::settings::WebcamSettings) -> Result<(u32, u32)> {
     let monitors = list_monitors(obs).await?;
     let mut chosen = pick(&monitors, choice);
     if chosen.is_empty() {
@@ -95,6 +95,9 @@ pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Re
     let scale = (MAX_SIDE / full_w as f64).min(MAX_SIDE / full_h as f64).min(1.0);
     let w = ((full_w as f64 * scale).round() as u32) & !1;
     let h = ((full_h as f64 * scale).round() as u32) & !1;
+    // Canvas FIRST: OBS rescales every scene item when the canvas changes, so
+    // items placed before it would end up zoomed and shifted.
+    set_canvas(obs, w, h).await?;
 
     // Fresh scene every time: the monitor layout may have changed.
     let scenes = obs.call("GetSceneList", json!({})).await?;
@@ -146,6 +149,9 @@ pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Re
     // The same audio sources as in the game scene.
     for a in audio_inputs {
         let _ = obs.call("CreateSceneItem", json!({ "sceneName": SCREEN_SCENE, "sourceName": a })).await;
+    }
+    if cam.enabled && obs.call("CreateSceneItem", json!({ "sceneName": SCREEN_SCENE, "sourceName": setup::WEBCAM })).await.is_ok() {
+        let _ = setup::place_webcam(obs, SCREEN_SCENE, w, h, cam).await;
     }
     Ok((w, h))
 }

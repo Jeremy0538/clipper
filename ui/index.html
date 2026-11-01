@@ -30,7 +30,12 @@
   </div>
 
   <main id="view-clips" class="view">
-    <div class="toolbar"><span id="clip-count"></span><span class="spacer"></span><button id="open-folder" class="small">Open folder</button></div>
+    <div class="toolbar"><span id="clip-count"></span><span class="spacer"></span>
+      <span id="sel-info" class="hidden"></span>
+      <button id="sel-combine" class="small primary hidden">Combine</button>
+      <button id="sel-clear" class="small hidden">Clear</button>
+      <button id="sel-mode" class="small" title="Pick clips to combine into one video">Select</button>
+      <button id="open-folder" class="small">Open folder</button></div>
     <div id="folders" class="chips"></div>
     <div id="clips"></div>
   </main>
@@ -156,6 +161,19 @@
       <p class="hint">Record up to two more apps (music, browser…) on their own tracks.</p>
       <div id="audio-apps"></div>
       <div class="row"><span></span><button id="add-audio-app">Add app…</button></div>
+    </section>
+
+    <section class="card">
+      <h2>Webcam</h2>
+      <p class="hint">Show your webcam in a corner of every clip and recording.</p>
+      <div class="row"><span>Show webcam</span><input type="checkbox" id="cam-enabled"></div>
+      <div class="row"><span>Camera</span><select id="cam-device"></select></div>
+      <div class="row"><span>Position</span>
+        <select id="cam-position">
+          <option value="top-left">Top left</option><option value="top-right">Top right</option>
+          <option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option>
+        </select></div>
+      <div class="row"><span>Size</span><input type="range" id="cam-size" min="10" max="40" step="1"><output></output></div>
     </section>
 
     <section class="card">

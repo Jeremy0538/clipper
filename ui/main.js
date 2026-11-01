@@ -15,7 +15,7 @@ for (const tab of document.querySelectorAll(".tab")) {
     if (ed.info) closeEditor();
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + tab.dataset.view));
-    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); loadMonitors(); }
+    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); loadMonitors(); loadCameras(); }
     meters(tab.dataset.view === "settings");
   };
 }
@@ -78,6 +78,39 @@ $("player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !listening) closePlayer(); });
 $("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
 
+// ---- select clips to combine (order = click order) ----
+let selecting = false, selected = [];
+function syncSelection() {
+  document.body.classList.toggle("selecting", selecting);
+  $("sel-mode").textContent = selecting ? "Done" : "Select";
+  for (const id of ["sel-info", "sel-clear"]) $(id).classList.toggle("hidden", !selecting);
+  $("sel-combine").classList.toggle("hidden", !selecting || selected.length < 2);
+  $("sel-info").textContent = selected.length ? `${selected.length} selected` : "Click clips in the order you want";
+  for (const el of document.querySelectorAll(".clip")) {
+    const i = selected.indexOf(el.dataset.path);
+    el.classList.toggle("selected", i >= 0);
+    el.querySelector(".order")?.remove();
+    if (i >= 0) {
+      const b = document.createElement("span"); b.className = "order"; b.textContent = i + 1;
+      el.querySelector(".thumb").append(b);
+    }
+  }
+}
+$("sel-mode").onclick = () => { selecting = !selecting; if (!selecting) selected = []; syncSelection(); };
+$("sel-clear").onclick = () => { selected = []; syncSelection(); };
+$("sel-combine").onclick = async () => {
+  $("sel-combine").disabled = true;
+  say("Combining… (first time: downloading ffmpeg)");
+  try {
+    await invoke("combine_clips", { paths: selected });
+    selected = []; selecting = false; syncSelection();
+    say("Combined into a new clip.");
+    loadClips();
+  } catch (err) { say("Combine failed: " + err); }
+  finally { $("sel-combine").disabled = false; }
+};
+listen("combine-progress", (e) => say(`Combining… ${e.payload}%`));
+
 function clipCard(c) {
   const el = document.createElement("div");
   el.className = "clip";
@@ -123,7 +156,16 @@ function clipCard(c) {
   };
   el.querySelector(".sub").textContent =
     `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
-  el.querySelector(".thumb").onclick = () => isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openPlayer(c);
+  el.dataset.path = c.path;
+  el.querySelector(".thumb").onclick = () => {
+    if (selecting) {
+      if (isImg) return say("Screenshots can't be combined.");
+      const i = selected.indexOf(c.path);
+      if (i >= 0) selected.splice(i, 1); else selected.push(c.path);
+      return syncSelection();
+    }
+    isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openPlayer(c);
+  };
   el.querySelector('[data-a="copy"]').onclick = () =>
     invoke("copy_clip", { path: c.path }).then(() => say("Copied: paste it in Discord with Ctrl+V."), say);
   el.querySelector('[data-a="edit"]')?.addEventListener("click", () => openEditor(c));
@@ -160,6 +202,8 @@ async function loadClips() {
   $("folders").classList.toggle("hidden", folders.length < 2);
   const clips = folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
   $("clips").replaceChildren(...clips.map(clipCard));
+  selected = selected.filter((p) => all.some((c) => c.path === p));
+  syncSelection();
   const gb = clips.reduce((n, c) => n + c.size, 0) / 1e9;
   $("clip-count").textContent = clips.length ? `${clips.length} clips · ${gb.toFixed(1)} GB`
     : "No clips yet: start a game and press " + (settings?.hotkey_label || "the clip key");
@@ -356,6 +400,39 @@ $("add-game").onclick = async () => {
   try { await invoke("add_custom_game", { app: a }); say(`${a.name} will now start clipping like a game.`); loadGames(); }
   catch (err) { say(err); }
 };
+
+// ---------- webcam ----------
+async function loadCameras() {
+  if (!settings) return;
+  const w = settings.webcam, sel = $("cam-device");
+  $("cam-enabled").checked = w.enabled;
+  $("cam-position").value = w.position;
+  $("cam-size").value = w.size;
+  $("cam-size").nextElementSibling.textContent = w.size + "%";
+  try {
+    const cams = status.obs === "ready" ? await invoke("list_cameras") : [];
+    sel.replaceChildren(...cams.map((c) => new Option(c.name, c.id)));
+    if (!cams.length) sel.replaceChildren(new Option("No camera found", ""));
+  } catch (err) { say(err); }
+  if (w.device && ![...sel.options].some((o) => o.value === w.device)) sel.add(new Option(w.device, w.device));
+  if (w.device) sel.value = w.device;
+  syncCam();
+}
+function syncCam() {
+  for (const id of ["cam-device", "cam-position", "cam-size"]) $(id).disabled = !$("cam-enabled").checked;
+}
+let camTimer;
+function saveCam() {
+  settings.webcam = {
+    enabled: $("cam-enabled").checked, device: $("cam-device").value,
+    position: $("cam-position").value, size: +$("cam-size").value,
+  };
+  syncCam();
+  clearTimeout(camTimer);
+  camTimer = setTimeout(() => invoke("set_webcam", { webcam: settings.webcam }).then(() => say("Webcam saved."), say), 250);
+}
+for (const id of ["cam-enabled", "cam-device", "cam-position"]) $(id).onchange = saveCam;
+$("cam-size").oninput = (e) => { e.target.nextElementSibling.textContent = e.target.value + "%"; saveCam(); };
 
 // ---------- level meters ----------
 listen("meters", (e) => {

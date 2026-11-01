@@ -21,6 +21,7 @@ pub struct Settings {
     pub height: u32,
     pub bitrate_kbps: u32,
     pub audio: crate::settings::AudioSettings,
+    pub webcam: crate::settings::WebcamSettings,
     /// "high" | "balanced" | "small"
     pub quality: String,
     /// The GPU encoder failed to start: use x264 on the CPU.
@@ -29,7 +30,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default(), quality: "balanced".into(), force_cpu: false }
+        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default(), webcam: Default::default(), quality: "balanced".into(), force_cpu: false }
     }
 }
 
