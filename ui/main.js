@@ -81,22 +81,52 @@ $("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
 function clipCard(c) {
   const el = document.createElement("div");
   el.className = "clip";
-  el.innerHTML = `<div class="thumb"><video muted preload="metadata"></video><span class="dur"></span></div>
-    <div class="meta"><div class="name"></div><div class="sub"></div></div>
+  const isImg = c.kind === "image";
+  el.innerHTML = `<div class="thumb">${isImg ? "<img alt=''>" : "<video muted preload='metadata'></video><span class='dur'></span>"}</div>
+    <div class="meta"><div><div class="name" title="Double-click to rename"></div><div class="sub"></div></div>
+      <button class="star" title="Star: never deleted by the storage limit">★</button></div>
     <div class="actions"><button data-a="copy" title="Copy the file, then paste it in Discord">Copy</button>
-      <button data-a="edit">Edit</button><button data-a="reveal">Show in folder</button><span class="spacer"></span>
+      ${isImg ? "" : "<button data-a='edit'>Edit</button>"}<button data-a="reveal">Show in folder</button><span class="spacer"></span>
       <button data-a="delete" class="danger">Delete</button></div>`;
-  const v = el.querySelector("video");
-  v.dataset.src = convertFileSrc(c.path);
-  v.onloadedmetadata = () => { el.querySelector(".dur").textContent = fmtDur(v.duration); };
-  lazy.observe(v);
-  el.querySelector(".name").textContent = c.name;
+  if (isImg) {
+    el.querySelector("img").src = convertFileSrc(c.path);
+  } else {
+    const v = el.querySelector("video");
+    v.dataset.src = convertFileSrc(c.path);
+    v.onloadedmetadata = () => { el.querySelector(".dur").textContent = fmtDur(v.duration); };
+    lazy.observe(v);
+  }
+  const nameEl = el.querySelector(".name");
+  nameEl.textContent = c.name;
+  nameEl.ondblclick = () => {
+    const inp = document.createElement("input");
+    inp.className = "rename"; inp.value = c.name;
+    nameEl.replaceWith(inp); inp.focus(); inp.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return; done = true;
+      if (save && inp.value.trim() && inp.value.trim() !== c.name) {
+        try { await invoke("rename_clip", { path: c.path, name: inp.value.trim() }); say("Renamed."); }
+        catch (err) { say(err); }
+      }
+      loadClips();
+    };
+    inp.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); e.stopPropagation(); };
+    inp.onblur = () => finish(true);
+  };
+  const star = el.querySelector(".star");
+  star.classList.toggle("on", !!c.favorite);
+  star.onclick = () => {
+    c.favorite = !c.favorite;
+    star.classList.toggle("on", c.favorite);
+    invoke("set_favorite", { path: c.path, on: c.favorite }).catch(say);
+  };
   el.querySelector(".sub").textContent =
-    `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(0)} MB`;
-  el.querySelector(".thumb").onclick = () => openPlayer(c);
+    `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
+  el.querySelector(".thumb").onclick = () => isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openPlayer(c);
   el.querySelector('[data-a="copy"]').onclick = () =>
     invoke("copy_clip", { path: c.path }).then(() => say("Copied: paste it in Discord with Ctrl+V."), say);
-  el.querySelector('[data-a="edit"]').onclick = () => openEditor(c);
+  el.querySelector('[data-a="edit"]')?.addEventListener("click", () => openEditor(c));
   el.querySelector('[data-a="reveal"]').onclick = () => invoke("reveal_clip", { path: c.path }).catch(say);
   const del = el.querySelector('[data-a="delete"]');
   del.onclick = async () => {
@@ -131,7 +161,8 @@ async function loadClips() {
   const clips = folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
   $("clips").replaceChildren(...clips.map(clipCard));
   const gb = clips.reduce((n, c) => n + c.size, 0) / 1e9;
-  $("clip-count").textContent = clips.length ? `${clips.length} clips · ${gb.toFixed(1)} GB` : "No clips yet";
+  $("clip-count").textContent = clips.length ? `${clips.length} clips · ${gb.toFixed(1)} GB`
+    : "No clips yet: start a game and press " + (settings?.hotkey_label || "the clip key");
 }
 
 // ---------- settings: recording ----------
@@ -142,6 +173,10 @@ async function loadSettings() {
   settings = await invoke("get_settings");
   $("hotkey").textContent = settings.hotkey_label;
   $("record-hotkey").textContent = settings.record_hotkey_label;
+  $("screenshot-hotkey").textContent = settings.screenshot_hotkey_label;
+  const sl = $("storage-limit");
+  if (![...sl.options].some((o) => +o.value === settings.storage_limit_gb)) sl.add(new Option(settings.storage_limit_gb + " GB", settings.storage_limit_gb));
+  sl.value = String(settings.storage_limit_gb);
   $("quality").value = settings.quality;
   loadMonitors();
   const sel = $("buffer-len");
@@ -290,6 +325,8 @@ async function loadMonitors() {
   if (![...sel.options].some((o) => o.value === want)) sel.add(new Option(want, want));
   sel.value = want;
 }
+$("storage-limit").onchange = (e) => invoke("set_storage_limit", { gb: +e.target.value })
+  .then(() => say(+e.target.value ? "Storage limit saved." : "No storage limit."), say);
 $("screen-monitor").onchange = (e) => invoke("set_screen_monitor", { monitor: e.target.value }).then(() => say("Screen saved."), say);
 
 // ---------- app picker ----------

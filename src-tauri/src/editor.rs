@@ -44,6 +44,8 @@ pub struct ClipInfo {
     pub thumbs: Vec<(f64, String)>,
     /// Container start time (keyframe times are relative to it).
     pub start: f64,
+    /// This clip's own temp folder (tracks + scrub images).
+    pub cache: String,
 }
 
 /// One small image per keyframe (≈ every second). Only keyframes are decoded,
@@ -72,6 +74,10 @@ pub struct ExportRequest {
     pub end: f64,
     /// Volume per source, same order as `ClipInfo::sources` (1.0 = unchanged).
     pub volumes: Vec<f64>,
+    /// Make the file fit in this many MB (e.g. Discord's upload limit):
+    /// one Mix track, bitrate (and if needed resolution) chosen to fit.
+    #[serde(default)]
+    pub target_mb: Option<f64>,
 }
 
 async fn run(mut c: tokio::process::Command) -> Result<std::process::Output> {
@@ -139,6 +145,7 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
         sources,
         thumbs: vec![],
         start,
+        cache: cache.to_string_lossy().into_owned(),
     })
 }
 
@@ -187,6 +194,12 @@ pub async fn export(
     let start = req.start.clamp(0.0, info.duration);
     let end = req.end.clamp(start + 0.2, info.duration);
     let trimmed = start > 0.05 || end < info.duration - 0.05;
+    let length = (end - start).max(0.1);
+    // Fit-to-size: total bits / seconds, minus the audio, with 7 % headroom for the container.
+    let fit_kbps = req.target_mb.map(|mb| ((mb * 8000.0 * 0.93 / length) - 128.0).max(250.0) as u32);
+    let reencode = trimmed || fit_kbps.is_some();
+    let max_h: Option<u32> = fit_kbps.map(|k| if k < 2500 { 720 } else if k < 6000 { 1080 } else { 1440 })
+        .filter(|&h| h < info.height);
 
     // Which sources carry sound in the range?
     let mut keep: Vec<(&Track, f64)> = vec![];
@@ -209,10 +222,11 @@ pub async fn export(
     }
 
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-    let mut out = clips_dir.join(format!("{} (edited) {stamp}.mp4", base_name(&info.name)));
+    let tag = if req.target_mb.is_some() { "(Discord)" } else { "(edited)" };
+    let mut out = clips_dir.join(format!("{} {tag} {stamp}.mp4", base_name(&info.name)));
     let mut n = 2;
     while out.exists() {
-        out = clips_dir.join(format!("{} (edited) {stamp} ({n}).mp4", base_name(&info.name)));
+        out = clips_dir.join(format!("{} {tag} {stamp} ({n}).mp4", base_name(&info.name)));
         n += 1;
     }
     let part = out.with_extension("part.mp4");
@@ -220,9 +234,12 @@ pub async fn export(
     let attempt = |encoder: &'static str| {
         let mut c = command(&tools.ffmpeg);
         c.args(["-hide_banner", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]);
+        if reencode {
+            // GPU decoding for what gets re-encoded (falls back to CPU by itself).
+            c.args(["-hwaccel", "auto"]);
+        }
         if trimmed {
-            // GPU decoding for the part that gets re-encoded (falls back to CPU by itself).
-            c.args(["-hwaccel", "auto", "-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
+            c.args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
         }
         c.arg("-i").arg(src);
         let mut graph = String::new();
@@ -243,12 +260,24 @@ pub async fn export(
         c.args(["-map", "0:v:0"]);
         if !mixed.is_empty() {
             c.args(["-map", "[mix]"]);
-            if keep.len() > 1 || info.sources.len() > 1 {
+            if fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1) {
                 for (t, _) in &keep {
                     c.args(["-map", &format!("0:a:{}", t.index)]);
                 }
             }
         }
+        if let Some(h) = max_h {
+            c.args(["-vf", &format!("scale=-2:{h}")]);
+        }
+        if let Some(k) = fit_kbps {
+            let (b, buf) = (format!("{k}k"), format!("{}k", k * 2));
+            match encoder {
+                "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+                "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+                "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+                _ => c.args(["-c:v", "libx264", "-preset", "medium", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+            };
+        } else {
         match (trimmed, encoder) {
             (false, _) => { c.args(["-c:v", "copy"]); }
             (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]); }
@@ -256,14 +285,16 @@ pub async fn export(
             (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]); }
             (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]); }
         }
+        }
         c.args(["-pix_fmt", "yuv420p"]);
         if !keep.is_empty() {
-            c.args(["-c:a:0", "aac", "-b:a:0", "192k", "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
-            let sources_mapped = keep.len() > 1 || info.sources.len() > 1;
+            let ab = if fit_kbps.is_some() { "128k" } else { "192k" };
+            c.args(["-c:a:0", "aac", "-b:a:0", ab, "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
+            let sources_mapped = fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1);
             if sources_mapped {
                 for (k, (t, _)) in keep.iter().enumerate() {
                     let o = k + 1;
-                    if trimmed {
+                    if reencode {
                         c.args([format!("-c:a:{o}"), "aac".into(), format!("-b:a:{o}"), "160k".into()]);
                     } else {
                         c.args([format!("-c:a:{o}"), "copy".into()]);
@@ -277,7 +308,6 @@ pub async fn export(
         c
     };
 
-    let length = (end - start).max(0.1);
     let mut last_err = None;
     let gpu = crate::gpu::detect().ffmpeg_encoder();
     let encoders: Vec<&'static str> = if gpu == "libx264" { vec!["libx264"] } else { vec![gpu, "libx264"] };
@@ -300,7 +330,7 @@ pub async fn export(
         crate::clog!("export with {encoder} failed: {err}");
         let _ = std::fs::remove_file(&part);
         last_err = Some(err);
-        if !trimmed {
+        if !reencode {
             break; // no video encoding involved: another encoder won't help
         }
     }
@@ -331,9 +361,25 @@ mod real_tests {
         let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
         println!("{info:#?}");
         for (s, e) in [(1.0, 4.0), (0.0, info.duration)] {
-            let req = super::ExportRequest { path: info.path.clone(), start: s, end: e, volumes: vec![0.5, 2.0, 1.0] };
+            let req = super::ExportRequest { path: info.path.clone(), start: s, end: e, volumes: vec![0.5, 2.0, 1.0], target_mb: None };
             let p = super::export(&tools, &out, &info, &req, |_| {}).await.unwrap();
             println!("exported {}", p.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    /// cargo test editor_fit -- --ignored --nocapture  (CLIPPER_TEST_CLIP, CLIPPER_TEST_OUT)
+    #[tokio::test]
+    #[ignore]
+    async fn editor_fit() {
+        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
+        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
+        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
+        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
+        let req = super::ExportRequest { path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(10.0) };
+        let p = super::export(&tools, &out, &info, &req, |_| {}).await.unwrap();
+        println!("fit {} -> {:.2} MB", p.display(), std::fs::metadata(&p).unwrap().len() as f64 / 1e6);
     }
 }

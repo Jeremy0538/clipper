@@ -47,6 +47,7 @@ pub async fn run(app: AppHandle) {
                     clog!("game detected: {} (pid {}, window \"{}\")", g.name, g.pid, g.obs_window);
                     notify::info(&app, "Game detected", g.name.clone());
                     let name = g.name.clone();
+                    *st.last_game.lock().unwrap() = Some(name.clone());
                     set_status(&app, |s| s.game = Some(name)).await;
                     current = Some(g);
                 } else if let Some(c) = current.as_mut() {

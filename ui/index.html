@@ -40,6 +40,12 @@
       <button id="ed-back">← Back</button>
       <span id="ed-title"></span><span class="spacer"></span>
       <span id="ed-status"></span>
+      <select id="ed-size" title="File size of the new clip">
+        <option value="">Full quality</option>
+        <option value="10">Fit for Discord (10 MB)</option>
+        <option value="50">Fit for Discord Nitro Basic (50 MB)</option>
+        <option value="500">Fit for Discord Nitro (500 MB)</option>
+      </select>
       <button id="ed-export" class="primary">Save as new clip</button>
     </div>
     <div id="ed-stage"><video id="ed-video" muted playsinline></video><img id="ed-scrub" alt=""></div>
@@ -82,6 +88,8 @@
         <button id="hotkey" class="keybtn" data-which="clip" title="Click, then press the new key combination">…</button></div>
       <div class="row"><span>Start/stop recording key</span>
         <button id="record-hotkey" class="keybtn" data-which="record" title="Click, then press the new key combination">…</button></div>
+      <div class="row"><span>Screenshot key</span>
+        <button id="screenshot-hotkey" class="keybtn" data-which="screenshot" title="Click, then press the new key combination">…</button></div>
       <div class="row"><span>Clip length</span>
         <select id="buffer-len">
           <option value="30">30 seconds</option><option value="60">1 minute</option>
@@ -97,6 +105,12 @@
           <option value="small">Small files</option>
         </select></div>
       <p class="hint">Resolution stays the same; only the amount of data per second changes.</p>
+      <div class="row"><span>Storage limit</span>
+        <select id="storage-limit">
+          <option value="0">No limit</option><option value="25">25 GB</option><option value="50">50 GB</option>
+          <option value="100">100 GB</option><option value="200">200 GB</option><option value="500">500 GB</option>
+        </select></div>
+      <p class="hint">Above the limit the oldest clips are deleted automatically. Starred (★) clips are always kept.</p>
       <div class="row"><span>Screen to record (no game)</span><select id="screen-monitor"></select></div>
       <p class="hint">Used by Record and by Start clipping when no game is running.</p>
     </section>

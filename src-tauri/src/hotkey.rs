@@ -84,6 +84,7 @@ impl Hotkey {
 pub enum Slot {
     Clip = 0,
     Record = 1,
+    Screenshot = 2,
 }
 
 impl Hotkey {
@@ -91,13 +92,17 @@ impl Hotkey {
     pub fn default_record() -> Self {
         Self { code: "F9".into(), shift: false, ctrl: false, alt: true }
     }
+    /// Default screenshot key: Alt+F10 (F12 alone is Steam's).
+    pub fn default_screenshot() -> Self {
+        Self { code: "F10".into(), shift: false, ctrl: false, alt: true }
+    }
 }
 
 // What the hook compares against (atomics: the hook callback can't lock).
 static ARMED: AtomicBool = AtomicBool::new(false);
-static VK: [AtomicU32; 2] = [AtomicU32::new(0x46), AtomicU32::new(0x78)];
+static VK: [AtomicU32; 3] = [AtomicU32::new(0x46), AtomicU32::new(0x78), AtomicU32::new(0x79)];
 /// Required modifiers: bit 0 shift, 1 ctrl, 2 alt.
-static MODS: [AtomicU32; 2] = [AtomicU32::new(1), AtomicU32::new(4)];
+static MODS: [AtomicU32; 3] = [AtomicU32::new(1), AtomicU32::new(4), AtomicU32::new(4)];
 
 pub fn set_armed(on: bool) {
     ARMED.store(on, Ordering::SeqCst);
@@ -125,7 +130,7 @@ pub fn start(app: tauri::AppHandle) {
     };
 
     static TX: OnceLock<mpsc::Sender<Slot>> = OnceLock::new();
-    static KEY_DOWN: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+    static KEY_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
 
     unsafe fn held(vk: u16) -> bool {
         (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0
@@ -134,7 +139,7 @@ pub fn start(app: tauri::AppHandle) {
     unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if code == HC_ACTION as i32 {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
-            for slot in [Slot::Clip, Slot::Record] {
+            for slot in [Slot::Clip, Slot::Record, Slot::Screenshot] {
                 let i = slot as usize;
                 if k.vkCode != VK[i].load(Ordering::SeqCst) {
                     continue;
@@ -147,7 +152,7 @@ pub fn start(app: tauri::AppHandle) {
                     let mods_ok = (m & 1 == 0 || held(VK_SHIFT.0))
                         && (m & 2 == 0 || held(VK_CONTROL.0))
                         && (m & 4 == 0 || held(VK_MENU.0));
-                    let armed = slot == Slot::Record || ARMED.load(Ordering::SeqCst);
+                    let armed = slot != Slot::Clip || ARMED.load(Ordering::SeqCst);
                     if first && mods_ok && armed {
                         if let Some(tx) = TX.get() {
                             let _ = tx.send(slot);
@@ -184,6 +189,14 @@ pub fn start(app: tauri::AppHandle) {
                     crate::clog!("clip key pressed");
                     tauri::async_runtime::spawn(async move {
                         let _ = crate::save_clip_inner(&app).await; // errors are reported inside
+                    });
+                }
+                Slot::Screenshot => {
+                    crate::clog!("screenshot key pressed");
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::take_screenshot(&app).await {
+                            crate::report_error(&app, format!("Screenshot: {e}"));
+                        }
                     });
                 }
                 Slot::Record => {

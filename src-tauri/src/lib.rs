@@ -60,6 +60,10 @@ pub struct AppState {
     /// The settings page is open: forward audio levels to it.
     pub meters: AtomicBool,
     pub screen: AtomicBool,
+    /// The last game seen: clips saved just after it closed still go to its folder.
+    pub last_game: std::sync::Mutex<Option<String>>,
+    /// Folder for the recording that is running (decided when it starts).
+    pub rec_folder: std::sync::Mutex<Option<String>>,
 }
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
@@ -75,14 +79,15 @@ fn update_tray(app: &AppHandle, s: &Status) {
     static ICON_IDLE: &[u8] = include_bytes!("../icons/32x32.png");
     static ICON_REC: &[u8] = include_bytes!("../icons/tray-recording.png");
     let Some(tray) = app.tray_by_id("tray") else { return };
-    let tip = match (&s.game, s.buffer) {
-        (Some(g), true) => format!("Clipper: recording {g}"),
-        (_, true) => "Clipper: recording".to_string(),
+    let tip = match (&s.game, s.buffer, s.recording) {
+        (_, _, true) => "Clipper: recording".to_string(),
+        (Some(g), true, _) => format!("Clipper: clipping {g}"),
+        (None, true, _) => "Clipper: clipping your screen".to_string(),
         _ if s.obs != "ready" => format!("Clipper: OBS {}", s.obs),
         _ => "Clipper: waiting for a game".to_string(),
     };
     let _ = tray.set_tooltip(Some(&tip));
-    if let Ok(img) = tauri::image::Image::from_bytes(if s.buffer { ICON_REC } else { ICON_IDLE }) {
+    if let Ok(img) = tauri::image::Image::from_bytes(if s.buffer || s.recording { ICON_REC } else { ICON_IDLE }) {
         let _ = tray.set_icon(Some(img));
     }
 }
@@ -118,7 +123,7 @@ pub(crate) async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     let r = async {
         if !st.status.lock().await.buffer {
-            return Err("The replay buffer is not running".to_string());
+            return Err("Clipping is off: start a game or press Start clipping".to_string());
         }
         st.obs.client.call("SaveReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
         Ok(())
@@ -128,6 +133,82 @@ pub(crate) async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
         report_error(app, format!("Could not save clip: {e}"));
     }
     r
+}
+
+/// Screenshot of what is captured: the game, or the chosen screen(s).
+pub(crate) async fn take_screenshot(app: &AppHandle) -> Result<(), String> {
+    let st = app.state::<AppState>();
+    let game = st.status.lock().await.game.clone();
+    let mut entered = false;
+    if game.is_none() && !st.screen.load(Ordering::SeqCst) {
+        modes::enter_screen(app).await?;
+        entered = true;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await; // let a frame render
+    }
+    let folder = game.unwrap_or_else(|| "Screenshots".into());
+    let dir = st.clips_dir.join(clips::sanitize(&folder));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("{} {}.png", clips::sanitize(&folder), chrono::Local::now().format("%Y-%m-%d %H-%M-%S")));
+    let scene = st.obs.client.call("GetCurrentProgramScene", json!({})).await.map_err(|e| e.to_string())?;
+    let r = st.obs.client.call("SaveSourceScreenshot", json!({
+        "sourceName": scene["currentProgramSceneName"], "imageFormat": "png",
+        "imageFilePath": file.to_string_lossy(),
+    })).await;
+    if entered {
+        let _ = modes::leave_screen(app).await;
+    }
+    r.map_err(|e| e.to_string())?;
+    clog!("screenshot saved: {}", file.display());
+    notify::toast(app, true, "Screenshot saved", folder);
+    let _ = app.emit("clip-saved", file.to_string_lossy());
+    Ok(())
+}
+
+/// After every new clip: keep the clips folder under the storage limit.
+async fn after_new_file(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let limit = st.user.lock().await.storage_limit_gb;
+    if limit <= 0.0 {
+        return;
+    }
+    let (dir, favs) = (st.clips_dir.clone(), clips::Favorites::new(&st.obs.data_dir).load());
+    let n = tauri::async_runtime::spawn_blocking(move || clips::enforce_limit(&dir, limit, &favs)).await.unwrap_or(0);
+    if n > 0 {
+        notify::info(app, "Storage limit", format!("Deleted {n} old clip(s)"));
+    }
+}
+
+#[tauri::command]
+async fn screenshot(app: AppHandle) -> Result<(), String> {
+    take_screenshot(&app).await
+}
+
+#[tauri::command]
+fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) -> Result<String, String> {
+    let p = clips::checked(&state.clips_dir, &path)?;
+    if name.trim().is_empty() {
+        return Err("Give the clip a name".into());
+    }
+    let new = clips::rename(&p, &name)?;
+    let favs = clips::Favorites::new(&state.obs.data_dir);
+    favs.moved(&p.to_string_lossy(), &new.to_string_lossy());
+    clog!("renamed {} → {}", p.display(), new.display());
+    Ok(new.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn set_favorite(state: tauri::State<'_, AppState>, path: String, on: bool) -> Result<(), String> {
+    let p = clips::checked(&state.clips_dir, &path)?;
+    clips::Favorites::new(&state.obs.data_dir).set(&p.to_string_lossy(), on);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_storage_limit(state: tauri::State<'_, AppState>, gb: f64) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.storage_limit_gb = gb.max(0.0);
+    clog!("storage limit: {} GB", u.storage_limit_gb);
+    u.save(&state.settings_file).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -195,6 +276,8 @@ struct SettingsView {
     hotkey: hotkey::Hotkey,
     hotkey_label: String,
     record_hotkey_label: String,
+    screenshot_hotkey_label: String,
+    storage_limit_gb: f64,
     buffer_secs: u32,
     max_buffer_secs: u32,
     sound: bool,
@@ -215,6 +298,8 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         hotkey: u.hotkey.clone(),
         hotkey_label: u.hotkey.label(),
         record_hotkey_label: u.record_hotkey.label(),
+        screenshot_hotkey_label: u.screenshot_hotkey.label(),
+        storage_limit_gb: u.storage_limit_gb,
         buffer_secs: u.buffer_secs,
         max_buffer_secs: MAX_BUFFER_SECS,
         sound: u.sound,
@@ -234,17 +319,25 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
 async fn set_hotkey(state: tauri::State<'_, AppState>, hotkey: hotkey::Hotkey, which: Option<String>)
     -> Result<String, String>
 {
-    let record = which.as_deref() == Some("record");
+    let slot = match which.as_deref() {
+        Some("record") => hotkey::Slot::Record,
+        Some("screenshot") => hotkey::Slot::Screenshot,
+        _ => hotkey::Slot::Clip,
+    };
     let mut u = state.user.lock().await;
-    let other = if record { &u.hotkey } else { &u.record_hotkey };
-    if other.vk() == hotkey.vk() && other.shift == hotkey.shift && other.ctrl == hotkey.ctrl && other.alt == hotkey.alt {
-        return Err("That key is already used for the other action".into());
+    let same = |o: &hotkey::Hotkey| o.vk() == hotkey.vk() && o.shift == hotkey.shift && o.ctrl == hotkey.ctrl && o.alt == hotkey.alt;
+    let others = [(hotkey::Slot::Clip, &u.hotkey), (hotkey::Slot::Record, &u.record_hotkey), (hotkey::Slot::Screenshot, &u.screenshot_hotkey)];
+    if others.iter().any(|(s, k)| *s != slot && same(k)) {
+        return Err("That key is already used for another action".into());
     }
-    let slot = if record { hotkey::Slot::Record } else { hotkey::Slot::Clip };
     hotkey::apply(slot, &hotkey)?;
-    clog!("{} key set to {}", if record { "record" } else { "clip" }, hotkey.label());
+    clog!("{slot:?} key set to {}", hotkey.label());
     let label = hotkey.label();
-    if record { u.record_hotkey = hotkey } else { u.hotkey = hotkey }
+    match slot {
+        hotkey::Slot::Record => u.record_hotkey = hotkey,
+        hotkey::Slot::Screenshot => u.screenshot_hotkey = hotkey,
+        hotkey::Slot::Clip => u.hotkey = hotkey,
+    }
     u.save(&state.settings_file).map_err(|e| e.to_string())?;
     Ok(label)
 }
@@ -268,6 +361,9 @@ async fn set_buffer(state: tauri::State<'_, AppState>, secs: u32) -> Result<u32,
     let was_running = obs.call("GetReplayBufferStatus", json!({})).await.map_err(err)?["outputActive"]
         .as_bool()
         .unwrap_or(false);
+    // Keep the game detector from restarting clipping while we change it.
+    let was_stopped = state.user_stopped.swap(true, Ordering::SeqCst);
+    let r = async {
     if was_running {
         obs.call("StopReplayBuffer", json!({})).await.map_err(err)?;
         for _ in 0..50 {
@@ -286,6 +382,11 @@ async fn set_buffer(state: tauri::State<'_, AppState>, secs: u32) -> Result<u32,
     if was_running {
         obs.call("StartReplayBuffer", json!({})).await.map_err(err)?;
     }
+    Ok::<(), String>(())
+    }
+    .await;
+    state.user_stopped.store(was_stopped, Ordering::SeqCst);
+    r?;
     Ok(secs)
 }
 
@@ -524,7 +625,11 @@ async fn editor_open(app: AppHandle, path: String) -> Result<editor::ClipInfo, S
     let st = app.state::<AppState>();
     let p = clips::checked(&st.clips_dir, &path)?;
     let tools = tools_for(&app).await?;
-    let info = editor::open(&tools, &st.obs.data_dir.join("editor-cache"), &p)
+    // A fresh folder per opened clip: scrub images still being made for a
+    // previous clip can't end up in this one.
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let _ = std::fs::remove_dir_all(st.obs.data_dir.join("editor-cache"));
+    let info = editor::open(&tools, &st.obs.data_dir.join("editor-cache").join(stamp.to_string()), &p)
         .await
         .map_err(|e| format!("Could not open the clip: {e:#}"))?;
     clog!("editor: opened {} ({:.1} s, {} sources)", info.name, info.duration, info.sources.len());
@@ -558,7 +663,7 @@ async fn editor_thumbs(app: AppHandle) -> Result<Vec<(f64, String)>, String> {
     let st = app.state::<AppState>();
     let info = st.editor.lock().await.clone().ok_or("No clip is open in the editor")?;
     let tools = tools_for(&app).await?;
-    let cache = st.obs.data_dir.join("editor-cache");
+    let cache = std::path::PathBuf::from(&info.cache);
     let t0 = std::time::Instant::now();
     let th = editor::keyframe_thumbs(&tools, std::path::Path::new(&info.path), &cache, info.start).await;
     clog!("editor: {} scrub images in {:.1} s", th.len(), t0.elapsed().as_secs_f64());
@@ -586,7 +691,12 @@ async fn editor_close(state: tauri::State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
-    clips::list(&state.clips_dir)
+    let favs = clips::Favorites::new(&state.obs.data_dir).load();
+    let mut v = clips::list(&state.clips_dir);
+    for c in &mut v {
+        c.favorite = favs.contains(&c.path);
+    }
+    v
 }
 
 /// Follow OBS events: buffer on/off, and adopt saved replays into the clips folder.
@@ -615,7 +725,8 @@ async fn watch_events(app: AppHandle) {
                 let game = match st.status.lock().await.game.clone() {
                     Some(g) => Some(g),
                     None if st.screen.load(Ordering::SeqCst) => Some("Screen".to_string()),
-                    None => None,
+                    // The game closed a moment ago: still its clip.
+                    None => st.last_game.lock().unwrap().clone(),
                 };
                 clog!("OBS wrote {src}");
                 match clips::adopt(src.as_ref(), &st.clips_dir, game.as_deref()) {
@@ -624,6 +735,7 @@ async fn watch_events(app: AppHandle) {
                         let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         notify::toast(&app, true, "Clip saved", name);
                         let _ = app.emit("clip-saved", p.to_string_lossy());
+                        after_new_file(&app).await;
                     }
                     Err(e) => report_error(&app, format!("Could not store clip: {e:#}")),
                 }
@@ -635,17 +747,21 @@ async fn watch_events(app: AppHandle) {
                 clog!("recording {}", state.trim_start_matches("OBS_WEBSOCKET_OUTPUT_").to_lowercase());
                 set_status(&app, |s| s.recording = active).await;
                 if state == "OBS_WEBSOCKET_OUTPUT_STARTED" {
+                    let st = app.state::<AppState>();
+                    let folder = st.status.lock().await.game.clone().unwrap_or_else(|| "Screen recording".into());
+                    *st.rec_folder.lock().unwrap() = Some(folder);
                     notify::info(&app, "Recording started", "");
                 }
                 if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
                     let st = app.state::<AppState>();
                     if let Some(src) = d["outputPath"].as_str() {
-                        let folder = st.status.lock().await.game.clone().unwrap_or_else(|| "Screen recording".into());
+                        let folder = st.rec_folder.lock().unwrap().take().unwrap_or_else(|| "Screen recording".into());
                         match clips::adopt(src.as_ref(), &st.clips_dir, Some(&folder)) {
                             Ok(p) => {
                                 clog!("recording saved: {}", p.display());
                                 notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                                 let _ = app.emit("clip-saved", p.to_string_lossy());
+                                after_new_file(&app).await;
                             }
                             Err(e) => report_error(&app, format!("Could not store recording: {e:#}")),
                         }
@@ -682,7 +798,8 @@ async fn watch_events(app: AppHandle) {
             DISCONNECTED => {
                 clog!("OBS websocket disconnected");
                 hotkey::set_armed(false);
-                set_status(&app, |s| s.buffer = false).await
+                app.state::<AppState>().screen.store(false, Ordering::SeqCst);
+                set_status(&app, |s| { s.buffer = false; s.recording = false; s.screen = false; }).await
             }
             _ => {}
         }
@@ -715,7 +832,8 @@ pub fn run() {
             remove_custom_game, set_meters,
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
-            editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color
+            editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
+            screenshot, rename_clip, set_favorite, set_storage_limit
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -740,6 +858,7 @@ pub fn run() {
             autostart::apply(user.autostart);
             hotkey::apply(hotkey::Slot::Clip, &user.hotkey)?;
             hotkey::apply(hotkey::Slot::Record, &user.record_hotkey)?;
+            hotkey::apply(hotkey::Slot::Screenshot, &user.screenshot_hotkey)?;
             hotkey::start(handle.clone());
             #[allow(unused_mut)]
             let mut settings = Settings {
@@ -766,13 +885,16 @@ pub fn run() {
                 editor: Mutex::new(None),
                 meters: AtomicBool::new(false),
                 screen: AtomicBool::new(false),
+                last_game: std::sync::Mutex::new(None),
+                rec_folder: std::sync::Mutex::new(None),
             });
 
             // Tray
             let open = MenuItem::with_id(app, "open", "Open Clipper", true, None::<&str>)?;
             let save = MenuItem::with_id(app, "save", "Save clip", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &save, &quit])?;
+            let record = MenuItem::with_id(app, "record", "Start/stop recording", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Clipper", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &save, &record, &quit])?;
             TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Clipper")
@@ -785,6 +907,14 @@ pub fn run() {
                         tauri::async_runtime::spawn(async move {
                             if let Err(e) = save_clip_inner(&app).await {
                                 let _ = app.emit("error", e);
+                            }
+                        });
+                    }
+                    "record" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = modes::toggle_recording(&app).await {
+                                report_error(&app, format!("Recording: {e}"));
                             }
                         });
                     }
@@ -878,6 +1008,10 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = ev {
                 api.prevent_close();
                 let _ = window.hide();
+                static TOLD: AtomicBool = AtomicBool::new(false);
+                if window.label() == "main" && !TOLD.swap(true, Ordering::SeqCst) {
+                    notify::info(window.app_handle(), "Clipper is still running", "Find it in the tray; Quit from its menu");
+                }
             }
         })
         .build(tauri::generate_context!())

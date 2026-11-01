@@ -13,6 +13,10 @@ pub struct UserSettings {
     pub hotkey: Hotkey,
     /// Start/stop a normal recording.
     pub record_hotkey: Hotkey,
+    /// Save a screenshot of what is being captured.
+    pub screenshot_hotkey: Hotkey,
+    /// Delete the oldest clips above this size (GB, 0 = off). Starred ones stay.
+    pub storage_limit_gb: f64,
     pub buffer_secs: u32,
     /// Chime when a clip is saved.
     pub sound: bool,
@@ -89,7 +93,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: true, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into() }
+        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: true, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into() }
     }
 }
 
@@ -104,6 +108,9 @@ impl UserSettings {
         }
         if s.record_hotkey.vk().is_none() {
             s.record_hotkey = Hotkey::default_record();
+        }
+        if s.screenshot_hotkey.vk().is_none() {
+            s.screenshot_hotkey = Hotkey::default_screenshot();
         }
         s.buffer_secs = s.buffer_secs.clamp(MIN_BUFFER_SECS, MAX_BUFFER_SECS);
         s
