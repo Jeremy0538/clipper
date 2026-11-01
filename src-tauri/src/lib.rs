@@ -1,6 +1,8 @@
 mod autobuffer;
 mod autostart;
 mod clips;
+mod editor;
+mod tools;
 mod games;
 mod hotkey;
 mod log;
@@ -45,6 +47,8 @@ pub struct AppState {
     pub user_stopped: AtomicBool,
     pub user: Mutex<UserSettings>,
     pub settings_file: PathBuf,
+    /// The clip open in the editor.
+    pub editor: Mutex<Option<editor::ClipInfo>>,
 }
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
@@ -327,6 +331,12 @@ async fn install_update(app: AppHandle, update: updater::Update) -> Result<(), S
     Ok(())
 }
 
+/// Lines from the UI (errors, editor events) into clipper.log.
+#[tauri::command]
+fn ui_log(msg: String) {
+    clog!("ui: {}", msg.chars().take(500).collect::<String>());
+}
+
 #[tauri::command]
 fn open_log_folder() -> Result<(), String> {
     let dir = log::path().and_then(|p| p.parent()).ok_or("no log folder")?;
@@ -360,6 +370,64 @@ fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), St
 fn open_clips_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
     std::process::Command::new(opener).arg(&state.clips_dir).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn tools_for(app: &AppHandle) -> Result<tools::Tools, String> {
+    let st = app.state::<AppState>();
+    let h = app.clone();
+    tools::ensure(&st.obs.data_dir, move |p| { let _ = h.emit("tools-progress", p); })
+        .await
+        .map_err(|e| format!("Could not get ffmpeg: {e:#}"))
+}
+
+#[tauri::command]
+async fn editor_open(app: AppHandle, path: String) -> Result<editor::ClipInfo, String> {
+    let st = app.state::<AppState>();
+    let p = clips::checked(&st.clips_dir, &path)?;
+    let tools = tools_for(&app).await?;
+    let info = editor::open(&tools, &st.obs.data_dir.join("editor-cache"), &p)
+        .await
+        .map_err(|e| format!("Could not open the clip: {e:#}"))?;
+    clog!("editor: opened {} ({:.1} s, {} sources)", info.name, info.duration, info.sources.len());
+    *st.editor.lock().await = Some(info.clone());
+    Ok(info)
+}
+
+#[tauri::command]
+async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let info = st.editor.lock().await.clone().ok_or("No clip is open in the editor")?;
+    if info.path != request.path {
+        return Err("The editor has a different clip open".into());
+    }
+    let tools = tools_for(&app).await?;
+    clog!("editor: export {:.2}-{:.2} volumes {:?}", request.start, request.end, request.volumes);
+    let h = app.clone();
+    let out = editor::export(&tools, &st.clips_dir, &info, &request, move |p| { let _ = h.emit("export-progress", p); })
+        .await
+        .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
+    clog!("editor: saved {}", out.display());
+    let _ = app.emit("clip-saved", out.to_string_lossy());
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// One extracted audio track as raw bytes (decoded by WebAudio in the editor).
+#[tauri::command]
+async fn editor_track(state: tauri::State<'_, AppState>, index: usize) -> Result<tauri::ipc::Response, String> {
+    let file = {
+        let ed = state.editor.lock().await;
+        let info = ed.as_ref().ok_or("No clip is open in the editor")?;
+        info.sources.iter().find(|t| t.index == index).ok_or("No such track")?.file.clone()
+    };
+    let bytes = tokio::fs::read(&file).await.map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+async fn editor_close(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    *state.editor.lock().await = None;
+    let _ = std::fs::remove_dir_all(state.obs.data_dir.join("editor-cache"));
     Ok(())
 }
 
@@ -431,7 +499,8 @@ pub fn run() {
             set_buffer, set_option, open_log_folder, set_audio,
             list_audio_devices, list_games, set_game_enabled,
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
-            check_update, install_update, set_theme
+            check_update, install_update, set_theme,
+            editor_open, editor_export, editor_close, editor_track, ui_log
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -447,6 +516,7 @@ pub fn run() {
             std::fs::create_dir_all(&clips_dir)?;
             log::init(data_dir.join("clipper.log"));
             updater::cleanup();
+            let _ = std::fs::remove_dir_all(data_dir.join("editor-cache"));
             clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
 
             let settings_file = data_dir.join("settings.json");
@@ -475,6 +545,7 @@ pub fn run() {
                 user_stopped: AtomicBool::new(false),
                 user: Mutex::new(user),
                 settings_file,
+                editor: Mutex::new(None),
             });
 
             // Tray
@@ -552,6 +623,15 @@ pub fn run() {
                 show_main(&handle);
             }
             // Development: open a tab directly (screenshots without clicking).
+            #[cfg(debug_assertions)]
+            if let (Ok(_), Some(w)) = (std::env::var("CLIPPER_DEV_EDIT"), handle.get_webview_window("main")) {
+                let then = if std::env::var("CLIPPER_DEV_EDIT").as_deref() == Ok("export") {
+                    "ed.start = 1; ed.end = 4; document.querySelector('#ed-tracks input').value = 50; \
+                     document.querySelector('#ed-tracks input').oninput(); $('ed-export').click();"
+                } else { "" };
+                let _ = w.eval(&format!(
+                    "setTimeout(async () => {{ await openEditor((await invoke('list_clips'))[0]); {then} }}, 1500)"));
+            }
             #[cfg(debug_assertions)]
             if let (Ok(view), Some(w)) = (std::env::var("CLIPPER_DEV_VIEW"), handle.get_webview_window("main")) {
                 let js = format!("setTimeout(() => document.querySelector('[data-view={view}]')?.click(), 800)");

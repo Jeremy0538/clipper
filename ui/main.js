@@ -5,10 +5,14 @@ let status = { obs: "", buffer: false, game: null };
 let settings = null;
 
 function say(t) { $("msg").textContent = t; }
+const uiLog = (m) => invoke("ui_log", { msg: String(m) }).catch(() => {});
+window.addEventListener("error", (e) => uiLog(`error: ${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => uiLog(`unhandled: ${e.reason}`));
 
 // ---------- tabs ----------
 for (const tab of document.querySelectorAll(".tab")) {
   tab.onclick = () => {
+    if (ed.info) closeEditor();
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + tab.dataset.view));
     if (tab.dataset.view === "settings") { loadDevices(); loadGames(); }
@@ -69,7 +73,7 @@ function clipCard(c) {
   el.innerHTML = `<div class="thumb"><video muted preload="metadata"></video><span class="dur"></span></div>
     <div class="meta"><div class="name"></div><div class="sub"></div></div>
     <div class="actions"><button data-a="copy" title="Copy the file, then paste it in Discord">Copy</button>
-      <button data-a="reveal">Show in folder</button><span class="spacer"></span>
+      <button data-a="edit">Edit</button><button data-a="reveal">Show in folder</button><span class="spacer"></span>
       <button data-a="delete" class="danger">Delete</button></div>`;
   const v = el.querySelector("video");
   v.dataset.src = convertFileSrc(c.path);
@@ -81,6 +85,7 @@ function clipCard(c) {
   el.querySelector(".thumb").onclick = () => openPlayer(c);
   el.querySelector('[data-a="copy"]').onclick = () =>
     invoke("copy_clip", { path: c.path }).then(() => say("Copied: paste it in Discord with Ctrl+V."), say);
+  el.querySelector('[data-a="edit"]').onclick = () => openEditor(c);
   el.querySelector('[data-a="reveal"]').onclick = () => invoke("reveal_clip", { path: c.path }).catch(say);
   const del = el.querySelector('[data-a="delete"]');
   del.onclick = async () => {

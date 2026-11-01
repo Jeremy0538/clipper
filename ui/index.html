@@ -31,6 +31,31 @@
     <div id="clips"></div>
   </main>
 
+  <main id="view-editor" class="view hidden">
+    <div class="ed-head">
+      <button id="ed-back">← Back</button>
+      <span id="ed-title"></span><span class="spacer"></span>
+      <span id="ed-status"></span>
+      <button id="ed-export" class="primary">Save as new clip</button>
+    </div>
+    <video id="ed-video" muted playsinline></video>
+    <div id="ed-timeline">
+      <div id="ed-range"></div><div id="ed-playhead"></div>
+      <div class="ed-handle" id="ed-h-start" title="Start"></div><div class="ed-handle" id="ed-h-end" title="End"></div>
+    </div>
+    <div class="ed-controls">
+      <button id="ed-play">Play</button>
+      <span id="ed-time">0:00.0</span>
+      <button id="ed-set-start">Start here (I)</button>
+      <button id="ed-set-end">End here (O)</button>
+      <button id="ed-reset">Reset</button>
+      <span id="ed-length"></span>
+      <span class="spacer"></span>
+      <span class="hint">Space plays · I/O set start/end · ←/→ 1 s</span>
+    </div>
+    <div id="ed-tracks"></div>
+  </main>
+
   <div id="player" class="hidden">
     <div class="player-box">
       <div class="player-head"><span id="player-title"></span><span class="spacer"></span><button id="player-close">Close</button></div>
@@ -120,5 +145,6 @@
     </section>
   </main>
   <script src="main.js"></script>
+  <script src="editor.js"></script>
 </body>
 </html>

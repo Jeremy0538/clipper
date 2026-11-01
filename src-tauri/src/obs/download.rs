@@ -29,7 +29,7 @@ pub async fn install(root: &Path, progress: impl Fn(u32)) -> Result<()> {
     let parent = root.parent().context("OBS folder has no parent")?;
     fs::create_dir_all(parent)?;
     let zip_path = parent.join("obs-download.zip");
-    download(&zip_path, &progress).await?;
+    download(URL, SHA256, &zip_path, &progress).await?;
 
     let tmp = parent.join("obs.new");
     let _ = fs::remove_dir_all(&tmp);
@@ -56,8 +56,9 @@ pub async fn install(root: &Path, progress: impl Fn(u32)) -> Result<()> {
     Ok(())
 }
 
-async fn download(dest: &Path, progress: &impl Fn(u32)) -> Result<()> {
-    let resp = reqwest::get(URL).await?.error_for_status()?;
+/// Stream `url` to `dest`, verifying the SHA-256 (hex) on the way.
+pub(crate) async fn download(url: &str, sha256: &str, dest: &Path, progress: &impl Fn(u32)) -> Result<()> {
+    let resp = reqwest::get(url).await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     let part = dest.with_extension("part");
     let mut file = fs::File::create(&part)?;
@@ -80,15 +81,15 @@ async fn download(dest: &Path, progress: &impl Fn(u32)) -> Result<()> {
     file.flush()?;
     drop(file);
     let hash = format!("{:x}", hasher.finalize());
-    if hash != SHA256 {
+    if hash != sha256 {
         let _ = fs::remove_file(&part);
-        bail!("OBS download is corrupt (checksum mismatch), will retry");
+        bail!("download is corrupt (checksum mismatch), will retry");
     }
     fs::rename(&part, dest)?;
     Ok(())
 }
 
-fn unzip(zip_path: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn unzip(zip_path: &Path, dest: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(fs::File::open(zip_path)?)?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;

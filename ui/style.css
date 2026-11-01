@@ -79,3 +79,18 @@ button.small { padding:4px 10px; font-size:12px; font-weight:400; }
 .winctl button:hover { background:var(--line); filter:none; }
 .winctl button.close:hover { background:#c42b1c; color:#fff; }
 .winctl svg { width:10px; height:10px; fill:none; stroke:currentColor; stroke-width:1; }
+#view-editor { padding:12px 18px 18px; display:flex; flex-direction:column; gap:10px; }
+.ed-head { display:flex; align-items:center; gap:10px; }
+#ed-title { font-weight:600; }
+#ed-status { color:var(--dim); }
+#ed-video { width:100%; max-height:55vh; background:#000; border-radius:8px; }
+#ed-timeline { flex:none; position:relative; height:44px; background:var(--card); border:1px solid var(--line); border-radius:6px; cursor:pointer; touch-action:none; }
+#ed-range { position:absolute; top:0; bottom:0; background:color-mix(in srgb, var(--accent) 30%, transparent); border-left:2px solid var(--accent); border-right:2px solid var(--accent); pointer-events:none; }
+#ed-playhead { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--fg); pointer-events:none; }
+.ed-handle { position:absolute; top:0; bottom:0; width:14px; margin-left:-7px; cursor:ew-resize; }
+.ed-handle::after { content:""; position:absolute; left:4px; top:8px; bottom:8px; width:6px; border-radius:3px; background:var(--accent); }
+.ed-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#ed-time, #ed-length { font-variant-numeric:tabular-nums; color:var(--dim); }
+#ed-tracks { display:grid; grid-template-columns:120px 1fr 56px; gap:6px 12px; align-items:center; max-width:720px; }
+#ed-tracks input[type=range] { accent-color:var(--accent); }
+#ed-tracks output { color:var(--dim); text-align:right; font-variant-numeric:tabular-nums; }
