@@ -1,0 +1,17 @@
+:root { --bg:#16161e; --card:#1f1f2b; --fg:#e6e6f0; --dim:#9090a8; --accent:#f38ba8; --ok:#a6e3a1; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px system-ui, sans-serif; }
+header { display:flex; align-items:center; gap:10px; padding:14px 18px; background:var(--card); }
+h1 { font-size:18px; margin:0 8px 0 0; }
+.spacer { flex:1; }
+.pill { padding:3px 10px; border-radius:999px; background:#2a2a3a; color:var(--dim); font-size:12px; }
+.pill.on { background:var(--ok); color:#10200e; }
+button { border:0; border-radius:8px; padding:8px 14px; background:#2a2a3a; color:var(--fg); cursor:pointer; }
+button.primary { background:var(--accent); color:#2a0d16; font-weight:600; }
+#msg { margin:8px 18px; color:var(--dim); min-height:1em; }
+main { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; padding:0 18px 18px; }
+.clip { background:var(--card); border-radius:10px; overflow:hidden; }
+.clip video { width:100%; aspect-ratio:16/9; background:#000; display:block; }
+.clip .meta { padding:8px 10px; }
+.clip .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.clip .sub { color:var(--dim); font-size:12px; }
