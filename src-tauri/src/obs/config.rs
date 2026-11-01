@@ -20,11 +20,12 @@ pub struct Settings {
     pub width: u32,
     pub height: u32,
     pub bitrate_kbps: u32,
+    pub audio: crate::settings::AudioSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000 }
+        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default() }
     }
 }
 

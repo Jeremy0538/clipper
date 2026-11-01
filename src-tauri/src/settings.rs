@@ -16,11 +16,55 @@ pub struct UserSettings {
     pub sound: bool,
     /// Small corner pop-ups (clip saved, game detected, errors) — debug aid.
     pub toast: bool,
+    pub audio: AudioSettings,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GameAudioMode {
+    /// Only the detected game's own sound (application capture).
+    #[default]
+    Game,
+    /// Everything the chosen output device plays.
+    Desktop,
+    Off,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct AudioSettings {
+    pub game_mode: GameAudioMode,
+    /// Output device for Desktop mode ("default" = Windows default).
+    pub desktop_device: String,
+    pub game_volume: f64,
+    pub discord_enabled: bool,
+    pub discord_volume: f64,
+    pub mic_enabled: bool,
+    /// Input device id ("default" = Windows default recording device).
+    pub mic_device: String,
+    pub mic_volume: f64,
+    pub mic_noise_suppression: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            game_mode: GameAudioMode::Game,
+            desktop_device: "default".into(),
+            game_volume: 1.0,
+            discord_enabled: true,
+            discord_volume: 1.0,
+            mic_enabled: true,
+            mic_device: "default".into(),
+            mic_volume: 1.0,
+            mic_noise_suppression: true,
+        }
+    }
 }
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true }
+        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default() }
     }
 }
 

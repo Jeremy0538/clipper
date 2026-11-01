@@ -83,7 +83,14 @@ pub async fn run(app: AppHandle) {
         // Only retarget when we know a window; never point OBS at "" mid-game.
         if targeted.as_ref() != Some(&want) && !(cfg!(windows) && game.obs_window.is_empty()) {
             if cfg!(windows) {
-                for input in [crate::obs::setup::GAME_CAPTURE, crate::obs::setup::GAME_AUDIO] {
+                let app_audio = st.obs.settings.lock().unwrap().audio.game_mode
+                    == crate::settings::GameAudioMode::Game;
+                let inputs: &[&str] = if app_audio {
+                    &[crate::obs::setup::GAME_CAPTURE, crate::obs::setup::GAME_AUDIO]
+                } else {
+                    &[crate::obs::setup::GAME_CAPTURE]
+                };
+                for &input in inputs {
                     let r = st.obs.client.call("SetInputSettings", json!({
                         "inputName": input,
                         "inputSettings": { "window": game.obs_window },

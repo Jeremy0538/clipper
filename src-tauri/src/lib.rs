@@ -10,7 +10,7 @@ mod settings;
 use obs::{config::Settings, ws::DISCONNECTED, ObsManager};
 use serde::Serialize;
 use serde_json::json;
-use settings::{UserSettings, MAX_BUFFER_SECS, MIN_BUFFER_SECS};
+use settings::{AudioSettings, UserSettings, MAX_BUFFER_SECS, MIN_BUFFER_SECS};
 use std::{
     path::PathBuf,
     sync::{
@@ -117,6 +117,7 @@ struct SettingsView {
     max_buffer_secs: u32,
     sound: bool,
     toast: bool,
+    audio: AudioSettings,
 }
 
 #[tauri::command]
@@ -129,6 +130,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         max_buffer_secs: MAX_BUFFER_SECS,
         sound: u.sound,
         toast: u.toast,
+        audio: u.audio.clone(),
     })
 }
 
@@ -194,6 +196,30 @@ async fn set_option(state: tauri::State<'_, AppState>, name: String, value: bool
     }
     clog!("option {name} = {value}");
     u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> Result<(), String> {
+    {
+        let mut u = state.user.lock().await;
+        u.audio = audio.clone();
+        u.save(&state.settings_file).map_err(|e| e.to_string())?;
+    }
+    clog!("audio settings: {audio:?}");
+    state.obs.settings.lock().unwrap().audio = audio;
+    if state.obs.client.is_connected().await {
+        state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
+        // Make the game detector point Game Audio at the game again.
+        state.obs_session.fetch_add(1, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_audio_devices(state: tauri::State<'_, AppState>, output: bool)
+    -> Result<Vec<obs::setup::Device>, String>
+{
+    obs::setup::list_devices(&state.obs.client, output).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -265,7 +291,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
-            set_buffer, set_option, open_log_folder
+            set_buffer, set_option, open_log_folder, set_audio,
+            list_audio_devices
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -287,7 +314,11 @@ pub fn run() {
             hotkey::apply(&user.hotkey)?;
             hotkey::start(handle.clone());
             #[allow(unused_mut)]
-            let mut settings = Settings { buffer_secs: user.buffer_secs, ..Settings::default() };
+            let mut settings = Settings {
+                buffer_secs: user.buffer_secs,
+                audio: user.audio.clone(),
+                ..Settings::default()
+            };
             // Canvas = primary monitor (games run there); even sizes for the encoder.
             #[cfg(windows)]
             if let Ok(Some(m)) = app.primary_monitor() {
@@ -362,6 +393,12 @@ pub fn run() {
 
             if !start_hidden {
                 show_main(&handle);
+            }
+            // Development: open a tab directly (screenshots without clicking).
+            #[cfg(debug_assertions)]
+            if let (Ok(view), Some(w)) = (std::env::var("CLIPPER_DEV_VIEW"), handle.get_webview_window("main")) {
+                let js = format!("setTimeout(() => document.querySelector('[data-view={view}]')?.click(), 800)");
+                let _ = w.eval(&js);
             }
             Ok(())
         })

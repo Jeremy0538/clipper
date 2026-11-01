@@ -8,29 +8,72 @@
 <body>
   <header>
     <h1>Clipper</h1>
+    <nav>
+      <button class="tab active" data-view="clips">Clips</button>
+      <button class="tab" data-view="settings">Settings</button>
+    </nav>
+    <span class="spacer"></span>
+    <span id="game" class="pill">No game</span>
     <span id="obs" class="pill">OBS: …</span>
     <span id="buffer" class="pill">Buffer: off</span>
-    <span class="spacer"></span>
     <button id="toggle">Start buffer</button>
     <button id="save" class="primary">Save clip</button>
   </header>
-  <section id="settings">
-    <label>Clip key <button id="hotkey" title="Click, then press the new key combination">…</button></label>
-    <label>Buffer
-      <select id="buffer-len">
-        <option value="30">30 s</option><option value="60">1 min</option>
-        <option value="90">1.5 min</option><option value="120">2 min</option>
-        <option value="180">3 min</option><option value="240">4 min</option>
-        <option value="300">5 min</option>
-      </select>
-    </label>
-    <label><input type="checkbox" id="opt-sound"> Sound on save</label>
-    <label><input type="checkbox" id="opt-toast"> Debug pop-ups</label>
-    <span class="spacer"></span>
-    <button id="logs">Open log folder</button>
-  </section>
   <p id="msg"></p>
-  <main id="clips"></main>
+
+  <main id="view-clips" class="view"><div id="clips"></div></main>
+
+  <main id="view-settings" class="view hidden">
+    <section class="card">
+      <h2>Recording</h2>
+      <div class="row"><span>Clip key</span>
+        <button id="hotkey" title="Click, then press the new key combination">…</button></div>
+      <div class="row"><span>Buffer length</span>
+        <select id="buffer-len">
+          <option value="30">30 seconds</option><option value="60">1 minute</option>
+          <option value="90">1.5 minutes</option><option value="120">2 minutes</option>
+          <option value="180">3 minutes</option><option value="240">4 minutes</option>
+          <option value="300">5 minutes</option>
+        </select></div>
+    </section>
+
+    <section class="card">
+      <h2>Audio <button id="refresh-devices" class="small">Refresh devices</button></h2>
+      <p class="hint">Every clip has separate tracks: Mix, Game, Discord and Mic. The editor uses them to change volumes afterwards.</p>
+
+      <h3>Game audio</h3>
+      <div class="row"><span>Source</span>
+        <select id="a-game-mode">
+          <option value="game">Only the game</option>
+          <option value="desktop">Everything I hear (output device)</option>
+          <option value="off">Off</option>
+        </select></div>
+      <div class="row" id="row-desktop"><span>Output device</span><select id="a-desktop-device"></select></div>
+      <div class="row"><span>Volume</span><input type="range" id="a-game-volume" min="0" max="300" step="5"><output></output></div>
+
+      <h3>Discord</h3>
+      <div class="row"><span>Record Discord</span><input type="checkbox" id="a-discord-enabled"></div>
+      <div class="row"><span>Volume</span><input type="range" id="a-discord-volume" min="0" max="300" step="5"><output></output></div>
+      <p class="hint">Discord is found through its window: if Discord is closed to the system tray, it can't be recorded.</p>
+
+      <h3>Microphone</h3>
+      <div class="row"><span>Record microphone</span><input type="checkbox" id="a-mic-enabled"></div>
+      <div class="row"><span>Device</span><select id="a-mic-device"></select></div>
+      <div class="row"><span>Volume</span><input type="range" id="a-mic-volume" min="0" max="300" step="5"><output></output></div>
+      <div class="row"><span>Noise suppression</span><input type="checkbox" id="a-mic-noise"></div>
+    </section>
+
+    <section class="card">
+      <h2>Notifications</h2>
+      <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="opt-sound"></div>
+      <div class="row"><span>Debug pop-ups</span><input type="checkbox" id="opt-toast"></div>
+    </section>
+
+    <section class="card">
+      <h2>Troubleshooting</h2>
+      <div class="row"><span>Log file and OBS logs</span><button id="logs">Open log folder</button></div>
+    </section>
+  </main>
   <script src="main.js"></script>
 </body>
 </html>

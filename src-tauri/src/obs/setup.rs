@@ -1,8 +1,11 @@
 //! Builds the scene over the websocket: one capture + one audio source per track.
 //! Track layout in every clip: 1 Mix, 2 Game, 3 Discord, 4 Mic.
+//! Re-run whenever the audio settings change; it adds, updates and removes inputs.
 
 use super::{config::SCENE, ws::ObsClient};
+use crate::settings::{AudioSettings, GameAudioMode};
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path};
 
@@ -10,6 +13,9 @@ pub const GAME_CAPTURE: &str = "Game Capture";
 pub const GAME_AUDIO: &str = "Game Audio";
 pub const DISCORD: &str = "Discord";
 pub const MIC: &str = "Mic";
+/// Audio inputs we own: removed when switched off.
+const MANAGED_AUDIO: [&str; 3] = [GAME_AUDIO, DISCORD, MIC];
+const NOISE_FILTER: &str = "Noise Suppression";
 
 pub struct InputSpec {
     pub name: &'static str,
@@ -19,86 +25,121 @@ pub struct InputSpec {
     pub tracks: &'static [u8],
     /// Scale to fill the canvas.
     pub fit: bool,
+    pub volume: f64,
     pub filters: Vec<(&'static str, &'static str, Value)>,
 }
 
 fn rnnoise() -> (&'static str, &'static str, Value) {
-    ("Noise Suppression", "noise_suppress_filter_v2", json!({ "method": "rnnoise" }))
+    (NOISE_FILTER, "noise_suppress_filter_v2", json!({ "method": "rnnoise" }))
 }
 
-/// The real Windows setup. Game inputs start untargeted; `games` points them at the game.
+pub fn input_device_kind() -> &'static str {
+    if cfg!(windows) { "wasapi_input_capture" } else { "pulse_input_capture" }
+}
+pub fn output_device_kind() -> &'static str {
+    if cfg!(windows) { "wasapi_output_capture" } else { "pulse_output_capture" }
+}
+
+/// The real Windows setup. Game Audio in "game" mode starts untargeted; the
+/// game detector points it (and Game Capture) at the game's window.
 #[cfg(windows)]
-pub fn specs(_dev_dir: &Path) -> Vec<InputSpec> {
-    vec![
-        InputSpec {
-            name: GAME_CAPTURE,
-            kind: "game_capture",
-            settings: json!({ "capture_mode": "window", "window": "", "priority": 2,
-                              "capture_cursor": true, "capture_audio": false }),
-            tracks: &[],
-            fit: true,
-            filters: vec![],
-        },
-        InputSpec {
+pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
+    let mut v = vec![InputSpec {
+        name: GAME_CAPTURE,
+        kind: "game_capture",
+        settings: json!({ "capture_mode": "window", "window": "", "priority": 2,
+                          "capture_cursor": true, "capture_audio": false }),
+        tracks: &[],
+        fit: true,
+        volume: 1.0,
+        filters: vec![],
+    }];
+    match a.game_mode {
+        GameAudioMode::Game => v.push(InputSpec {
             name: GAME_AUDIO,
             kind: "wasapi_process_output_capture",
-            settings: json!({ "window": "", "priority": 2 }),
+            settings: json!({ "priority": 2 }),
             tracks: &[1, 2],
             fit: false,
+            volume: a.game_volume,
             filters: vec![],
-        },
-        InputSpec {
+        }),
+        GameAudioMode::Desktop => v.push(InputSpec {
+            name: GAME_AUDIO,
+            kind: "wasapi_output_capture",
+            settings: json!({ "device_id": a.desktop_device }),
+            tracks: &[1, 2],
+            fit: false,
+            volume: a.game_volume,
+            filters: vec![],
+        }),
+        GameAudioMode::Off => {}
+    }
+    if a.discord_enabled {
+        v.push(InputSpec {
             name: DISCORD,
             kind: "wasapi_process_output_capture",
             settings: json!({ "window": "Discord:Chrome_WidgetWin_1:Discord.exe", "priority": 2 }),
             tracks: &[1, 3],
             fit: false,
+            volume: a.discord_volume,
             filters: vec![],
-        },
-        InputSpec {
+        });
+    }
+    if a.mic_enabled {
+        v.push(InputSpec {
             name: MIC,
             kind: "wasapi_input_capture",
-            settings: json!({ "device_id": "default" }),
+            settings: json!({ "device_id": a.mic_device }),
             tracks: &[1, 4],
             fit: false,
-            filters: vec![rnnoise()],
-        },
-    ]
+            volume: a.mic_volume,
+            filters: if a.mic_noise_suppression { vec![rnnoise()] } else { vec![] },
+        });
+    }
+    v
 }
 
 /// Linux development stand-ins: looping test files instead of real capture,
-/// so nothing on the developer's screen or microphone gets recorded.
+/// so nothing on the developer's screen or microphone gets recorded. Device
+/// choices are ignored here; on/off, volume and noise suppression apply.
 #[cfg(not(windows))]
-pub fn specs(dev_dir: &Path) -> Vec<InputSpec> {
+pub fn specs(dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
     let file = |n: &str| dev_dir.join(n).to_string_lossy().into_owned();
     let media = |f: String| json!({ "local_file": f, "is_local_file": true, "looping": true,
                                     "restart_on_activate": false, "close_when_inactive": false });
-    vec![
-        InputSpec {
-            name: GAME_CAPTURE,
-            kind: "ffmpeg_source",
-            settings: media(file("dev-game.mp4")),
-            tracks: &[1, 2],
-            fit: true,
-            filters: vec![],
-        },
-        InputSpec {
+    let mut v = vec![InputSpec {
+        name: GAME_CAPTURE,
+        kind: "ffmpeg_source",
+        settings: media(file("dev-game.mp4")),
+        tracks: if a.game_mode == GameAudioMode::Off { &[] } else { &[1, 2] },
+        fit: true,
+        volume: a.game_volume,
+        filters: vec![],
+    }];
+    if a.discord_enabled {
+        v.push(InputSpec {
             name: DISCORD,
             kind: "ffmpeg_source",
             settings: media(file("dev-discord.m4a")),
             tracks: &[1, 3],
             fit: false,
+            volume: a.discord_volume,
             filters: vec![],
-        },
-        InputSpec {
+        });
+    }
+    if a.mic_enabled {
+        v.push(InputSpec {
             name: MIC,
             kind: "ffmpeg_source",
             settings: media(file("dev-mic.m4a")),
             tracks: &[1, 4],
             fit: false,
-            filters: vec![rnnoise()],
-        },
-    ]
+            volume: a.mic_volume,
+            filters: if a.mic_noise_suppression { vec![rnnoise()] } else { vec![] },
+        });
+    }
+    v
 }
 
 /// Generate the Linux stand-in media once (needs ffmpeg).
@@ -137,6 +178,13 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
         .filter_map(|i| Some((i["inputName"].as_str()?.into(), i["inputKind"].as_str()?.into())))
         .collect();
 
+    // Switched-off sources go away entirely (their track stays silent).
+    for name in MANAGED_AUDIO {
+        if existing.contains_key(name) && !specs.iter().any(|s| s.name == name) {
+            obs.call("RemoveInput", json!({ "inputName": name })).await?;
+        }
+    }
+
     for spec in specs {
         match existing.get(spec.name) {
             Some(kind) if kind == spec.kind => {
@@ -156,11 +204,14 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
             }
         }
 
-        if !spec.tracks.is_empty() {
-            let tracks: serde_json::Map<String, Value> =
-                (1..=6u8).map(|t| (t.to_string(), spec.tracks.contains(&t).into())).collect();
+        // Media stand-ins carry audio even when no track is wanted: set all six.
+        let tracks: serde_json::Map<String, Value> =
+            (1..=6u8).map(|t| (t.to_string(), spec.tracks.contains(&t).into())).collect();
+        if !spec.tracks.is_empty() || spec.kind == "ffmpeg_source" {
             obs.call("SetInputAudioTracks",
                 json!({ "inputName": spec.name, "inputAudioTracks": tracks })).await?;
+            obs.call("SetInputVolume",
+                json!({ "inputName": spec.name, "inputVolumeMul": spec.volume.clamp(0.0, 20.0) })).await?;
         }
 
         if spec.fit {
@@ -196,6 +247,50 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
                 .await?;
             }
         }
+        if have.iter().any(|n| n == NOISE_FILTER) && !spec.filters.iter().any(|f| f.0 == NOISE_FILTER) {
+            obs.call("RemoveSourceFilter",
+                json!({ "sourceName": spec.name, "filterName": NOISE_FILTER })).await?;
+        }
     }
     Ok(())
+}
+
+#[derive(Serialize, Clone)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+}
+
+/// Audio devices as OBS sees them (ids are what OBS stores as `device_id`).
+/// Uses a short-lived probe input that is never shown or mixed.
+pub async fn list_devices(obs: &ObsClient, output: bool) -> Result<Vec<Device>> {
+    // OBS removes inputs asynchronously: a unique name avoids clashing with
+    // a probe from a moment ago.
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let (name, kind) = if output {
+        (format!("_probe_output_{stamp}"), output_device_kind())
+    } else {
+        (format!("_probe_input_{stamp}"), input_device_kind())
+    };
+    let name = name.as_str();
+    obs.call("CreateInput", json!({
+        "sceneName": SCENE, "inputName": name, "inputKind": kind,
+        "inputSettings": {}, "sceneItemEnabled": false,
+    }))
+    .await?;
+    let _ = obs.call("SetInputMute", json!({ "inputName": name, "inputMuted": true })).await;
+    let items = obs
+        .call("GetInputPropertiesListPropertyItems", json!({ "inputName": name, "propertyName": "device_id" }))
+        .await;
+    let _ = obs.call("RemoveInput", json!({ "inputName": name })).await;
+    Ok(items?["propertyItems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["itemEnabled"].as_bool().unwrap_or(true))
+        .filter_map(|i| Some(Device {
+            id: i["itemValue"].as_str()?.to_string(),
+            name: i["itemName"].as_str()?.to_string(),
+        }))
+        .collect())
 }

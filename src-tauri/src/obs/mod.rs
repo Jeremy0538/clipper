@@ -121,7 +121,7 @@ impl ObsManager {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let specs = setup::specs(&self.data_dir);
+        let specs = setup::specs(&self.data_dir, &settings.audio);
         if let Err(e) =
             setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await
         {
@@ -136,6 +136,13 @@ impl ObsManager {
             bail!("OBS exited ({status})");
         }
         Ok(())
+    }
+
+    /// Re-apply the audio part of the scene (after a settings change).
+    pub async fn apply_audio(&self) -> Result<()> {
+        let s = self.settings.lock().unwrap().clone();
+        let specs = setup::specs(&self.data_dir, &s.audio);
+        setup::ensure_scene(&self.client, &specs, s.width, s.height).await
     }
 
     /// Stop OBS for good (app is quitting). Gentle first, forced after a few seconds.
