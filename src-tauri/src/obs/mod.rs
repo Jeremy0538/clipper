@@ -2,6 +2,7 @@
 //! scene, and restarts it if it dies.
 
 pub mod config;
+pub mod download;
 pub mod setup;
 pub mod ws;
 
@@ -66,10 +67,13 @@ impl ObsManager {
     }
 
     async fn run_once(&self, report: &impl Fn(String)) -> Result<()> {
-        if cfg!(windows) && !self.paths.exe.exists() {
-            bail!("OBS not found. Unpack the OBS Studio zip (Windows x64) into {}",
-                  self.paths.exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
-                      .unwrap_or(&self.paths.exe).display());
+        #[cfg(windows)]
+        {
+            let root = self.data_dir.join("obs");
+            if !download::installed(&root) {
+                report("downloading OBS 0%".into());
+                download::install(&root, |p| report(format!("downloading OBS {p}%"))).await?;
+            }
         }
         config::write_all(&self.paths, &self.settings, &self.incoming, &self.password)?;
         #[cfg(not(windows))]
