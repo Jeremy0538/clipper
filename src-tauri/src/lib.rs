@@ -7,6 +7,7 @@ mod log;
 mod notify;
 mod obs;
 mod settings;
+mod updater;
 
 use obs::{config::Settings, ws::DISCONNECTED, ObsManager};
 use serde::Serialize;
@@ -147,6 +148,9 @@ struct SettingsView {
     sound: bool,
     toast: bool,
     autostart: bool,
+    test_builds: bool,
+    theme: String,
+    version: String,
     audio: AudioSettings,
 }
 
@@ -161,6 +165,9 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         sound: u.sound,
         toast: u.toast,
         autostart: u.autostart,
+        test_builds: u.test_builds,
+        theme: u.theme.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
     })
 }
@@ -223,6 +230,7 @@ async fn set_option(state: tauri::State<'_, AppState>, name: String, value: bool
     match name.as_str() {
         "sound" => u.sound = value,
         "toast" => u.toast = value,
+        "test_builds" => u.test_builds = value,
         "autostart" => {
             u.autostart = value;
             autostart::apply(value);
@@ -290,10 +298,68 @@ async fn set_game_enabled(state: tauri::State<'_, AppState>, name: String, enabl
 }
 
 #[tauri::command]
+async fn set_theme(state: tauri::State<'_, AppState>, theme: String) -> Result<(), String> {
+    if !["system", "light", "dark", "oled"].contains(&theme.as_str()) {
+        return Err(format!("unknown theme {theme}"));
+    }
+    let mut u = state.user.lock().await;
+    u.theme = theme;
+    u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_update(state: tauri::State<'_, AppState>) -> Result<Option<updater::Update>, String> {
+    let test = state.user.lock().await.test_builds;
+    let r = updater::check(test).await.map_err(|e| format!("{e:#}"));
+    clog!("update check: {r:?}");
+    r
+}
+
+/// Downloads, swaps the exe and quits; the new version starts by itself.
+#[tauri::command]
+async fn install_update(app: AppHandle, update: updater::Update) -> Result<(), String> {
+    clog!("installing update {}", update.version);
+    let h = app.clone();
+    updater::install(&update, move |p| { let _ = h.emit("update-progress", p); })
+        .await
+        .map_err(|e| { clog!("ERROR update: {e:#}"); format!("{e:#}") })?;
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
 fn open_log_folder() -> Result<(), String> {
     let dir = log::path().and_then(|p| p.parent()).ok_or("no log folder")?;
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
     std::process::Command::new(opener).arg(dir).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let p = clips::checked(&state.clips_dir, &path)?;
+    clips::trash(&p)?;
+    clog!("clip moved to the recycle bin: {}", p.display());
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let p = clips::checked(&state.clips_dir, &path)?;
+    tauri::async_runtime::spawn_blocking(move || clips::copy_file(&p))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    clips::reveal(&clips::checked(&state.clips_dir, &path)?)
+}
+
+#[tauri::command]
+fn open_clips_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(&state.clips_dir).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -354,12 +420,18 @@ fn dir_from_env(var: &str) -> Option<PathBuf> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let start_hidden = std::env::args().any(|a| a == "--hidden");
+    updater::wait_for_previous();
 
     let app = tauri::Builder::default()
+        // A second start (desktop icon while it runs in the tray) opens the
+        // running Clipper instead of starting another OBS.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .invoke_handler(tauri::generate_handler![
             get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
             set_buffer, set_option, open_log_folder, set_audio,
-            list_audio_devices, list_games, set_game_enabled
+            list_audio_devices, list_games, set_game_enabled,
+            delete_clip, copy_clip, reveal_clip, open_clips_folder,
+            check_update, install_update, set_theme
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -374,6 +446,7 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&clips_dir)?;
             log::init(data_dir.join("clipper.log"));
+            updater::cleanup();
             clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
 
             let settings_file = data_dir.join("settings.json");
@@ -458,6 +531,22 @@ pub fn run() {
             tauri::async_runtime::spawn(watch_events(handle.clone()));
             tauri::async_runtime::spawn(autobuffer::run(handle.clone()));
             notify::setup(&handle)?;
+
+            // Look for an update shortly after start; tell the user, never auto-install.
+            let h = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                let test = h.state::<AppState>().user.lock().await.test_builds;
+                match updater::check(test).await {
+                    Ok(Some(u)) => {
+                        clog!("update available: {}", u.version);
+                        notify::info(&h, "Update available", format!("Clipper {} (Settings → Updates)", u.version));
+                        let _ = h.emit("update-available", u);
+                    }
+                    Ok(None) => clog!("no update"),
+                    Err(e) => clog!("update check failed: {e:#}"),
+                }
+            });
 
             if !start_hidden {
                 show_main(&handle);

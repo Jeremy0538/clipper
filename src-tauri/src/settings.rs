@@ -21,6 +21,10 @@ pub struct UserSettings {
     pub disabled_games: Vec<String>,
     /// Start hidden in the tray when Windows starts.
     pub autostart: bool,
+    /// Offer test builds (pre-releases) as updates.
+    pub test_builds: bool,
+    /// "system" | "light" | "dark" | "oled"
+    pub theme: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -68,7 +72,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], autostart: true }
+        Self { hotkey: Hotkey::default(), buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], autostart: true, test_builds: true, theme: "system".into() }
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "clipper"
-version = "0.1.0"
+version = "0.1.6"
 edition = "2021"
 
 [lib]
@@ -22,6 +22,9 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
 chrono = "0.4"
+semver = "1"
+tauri-plugin-single-instance = "2"
+trash = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }

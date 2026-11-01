@@ -34,25 +34,76 @@ $("toggle").onclick = () => invoke(status.buffer ? "stop_buffer" : "start_buffer
 $("save").onclick = () => invoke("save_clip").catch(say);
 
 // ---------- clips ----------
+const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+// Thumbnails only load when the card scrolls into view (big clips are heavy).
+const lazy = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    const v = e.target;
+    v.src = v.dataset.src + "#t=1";
+    lazy.unobserve(v);
+  }
+}, { rootMargin: "200px" });
+
+function openPlayer(c) {
+  $("player-title").textContent = c.name;
+  $("player-video").src = convertFileSrc(c.path);
+  $("player").classList.remove("hidden");
+  $("player-video").play().catch(() => {});
+}
+function closePlayer() {
+  $("player-video").pause();
+  $("player-video").removeAttribute("src");
+  $("player-video").load();
+  $("player").classList.add("hidden");
+}
+$("player-close").onclick = closePlayer;
+$("player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
+window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !listening) closePlayer(); });
+$("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
+
+function clipCard(c) {
+  const el = document.createElement("div");
+  el.className = "clip";
+  el.innerHTML = `<div class="thumb"><video muted preload="metadata"></video><span class="dur"></span></div>
+    <div class="meta"><div class="name"></div><div class="sub"></div></div>
+    <div class="actions"><button data-a="copy" title="Copy the file, then paste it in Discord">Copy</button>
+      <button data-a="reveal">Show in folder</button><span class="spacer"></span>
+      <button data-a="delete" class="danger">Delete</button></div>`;
+  const v = el.querySelector("video");
+  v.dataset.src = convertFileSrc(c.path);
+  v.onloadedmetadata = () => { el.querySelector(".dur").textContent = fmtDur(v.duration); };
+  lazy.observe(v);
+  el.querySelector(".name").textContent = c.name;
+  el.querySelector(".sub").textContent =
+    `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(0)} MB`;
+  el.querySelector(".thumb").onclick = () => openPlayer(c);
+  el.querySelector('[data-a="copy"]').onclick = () =>
+    invoke("copy_clip", { path: c.path }).then(() => say("Copied: paste it in Discord with Ctrl+V."), say);
+  el.querySelector('[data-a="reveal"]').onclick = () => invoke("reveal_clip", { path: c.path }).catch(say);
+  const del = el.querySelector('[data-a="delete"]');
+  del.onclick = async () => {
+    if (!del.classList.contains("armed")) {   // first click arms, second deletes
+      del.classList.add("armed");
+      del.textContent = "Sure?";
+      setTimeout(() => { del.classList.remove("armed"); del.textContent = "Delete"; }, 3000);
+      return;
+    }
+    try {
+      await invoke("delete_clip", { path: c.path });
+      say("Moved to the recycle bin.");
+      loadClips();
+    } catch (err) { say(err); }
+  };
+  return el;
+}
+
 async function loadClips() {
   const clips = await invoke("list_clips");
-  $("clips").replaceChildren(...clips.map((c) => {
-    const el = document.createElement("div");
-    el.className = "clip";
-    const v = document.createElement("video");
-    v.src = convertFileSrc(c.path);
-    v.preload = "metadata";
-    v.controls = true;
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.innerHTML = `<div class="name"></div><div class="sub"></div>`;
-    meta.querySelector(".name").textContent = c.name;
-    meta.querySelector(".sub").textContent =
-      `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(1)} MB`;
-    el.append(v, meta);
-    return el;
-  }));
-  if (!clips.length) say("No clips yet.");
+  $("clips").replaceChildren(...clips.map(clipCard));
+  const gb = clips.reduce((n, c) => n + c.size, 0) / 1e9;
+  $("clip-count").textContent = clips.length ? `${clips.length} clips · ${gb.toFixed(1)} GB` : "No clips yet";
 }
 
 // ---------- settings: recording ----------
@@ -70,6 +121,9 @@ async function loadSettings() {
   $("opt-sound").checked = settings.sound;
   $("opt-toast").checked = settings.toast;
   $("opt-autostart").checked = settings.autostart;
+  $("opt-test_builds").checked = settings.test_builds;
+  $("version").textContent = settings.version;
+  applyTheme(settings.theme);
   showAudio(settings.audio);
 }
 
@@ -99,10 +153,44 @@ $("buffer-len").onchange = async (e) => {
     say(status.buffer ? "Buffer length changed (the buffer restarted)." : "Buffer length saved.");
   } catch (err) { say(err); }
 };
-for (const name of ["sound", "toast", "autostart"]) {
+for (const name of ["sound", "toast", "autostart", "test_builds"]) {
   $("opt-" + name).onchange = (e) => invoke("set_option", { name, value: e.target.checked }).catch(say);
 }
 $("logs").onclick = () => invoke("open_log_folder").catch(say);
+
+// ---------- appearance ----------
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  $("theme").value = t;
+  try { localStorage.setItem("theme", t); } catch {}
+}
+try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
+$("theme").onchange = (e) => { applyTheme(e.target.value); invoke("set_theme", { theme: e.target.value }).catch(say); };
+
+// ---------- updates ----------
+let pendingUpdate = null;
+function showUpdate(u) {
+  pendingUpdate = u;
+  $("update-text").textContent = u ? `Version ${u.version} is available` : "You have the latest version";
+  $("install-update").classList.toggle("hidden", !u);
+  document.querySelector('[data-view="settings"]').textContent = u ? "Settings •" : "Settings";
+}
+$("check-update").onclick = async () => {
+  $("update-text").textContent = "Checking…";
+  try { showUpdate(await invoke("check_update")); } catch (err) { $("update-text").textContent = String(err); }
+};
+$("install-update").onclick = async () => {
+  if (!pendingUpdate) return;
+  $("install-update").disabled = $("check-update").disabled = true;
+  $("update-text").textContent = "Downloading…";
+  try { await invoke("install_update", { update: pendingUpdate }); }
+  catch (err) {
+    $("update-text").textContent = "Update failed: " + err;
+    $("install-update").disabled = $("check-update").disabled = false;
+  }
+};
+listen("update-available", (e) => showUpdate(e.payload));
+listen("update-progress", (e) => { $("update-text").textContent = `Downloading… ${e.payload}%`; });
 
 // ---------- settings: games ----------
 let games = [];

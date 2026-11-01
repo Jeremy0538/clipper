@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
   <meta charset="utf-8">
   <title>Clipper</title>
@@ -21,7 +21,17 @@
   </header>
   <p id="msg"></p>
 
-  <main id="view-clips" class="view"><div id="clips"></div></main>
+  <main id="view-clips" class="view">
+    <div class="toolbar"><span id="clip-count"></span><span class="spacer"></span><button id="open-folder" class="small">Open folder</button></div>
+    <div id="clips"></div>
+  </main>
+
+  <div id="player" class="hidden">
+    <div class="player-box">
+      <div class="player-head"><span id="player-title"></span><span class="spacer"></span><button id="player-close">Close</button></div>
+      <video id="player-video" controls></video>
+    </div>
+  </div>
 
   <main id="view-settings" class="view hidden">
     <section class="card">
@@ -74,6 +84,24 @@
       <h2>Notifications</h2>
       <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="opt-sound"></div>
       <div class="row"><span>Debug pop-ups</span><input type="checkbox" id="opt-toast"></div>
+    </section>
+
+    <section class="card">
+      <h2>Appearance</h2>
+      <div class="row"><span>Theme</span>
+        <select id="theme">
+          <option value="system">Same as Windows</option><option value="light">Light</option>
+          <option value="dark">Dark</option><option value="oled">OLED black</option>
+        </select></div>
+    </section>
+
+    <section class="card">
+      <h2>Updates</h2>
+      <div class="row"><span>Installed version</span><span id="version"></span></div>
+      <div class="row"><span id="update-text">Not checked yet</span>
+        <button id="check-update">Check for updates</button>
+        <button id="install-update" class="primary hidden">Update now</button></div>
+      <div class="row"><span>Include test builds</span><input type="checkbox" id="opt-test_builds"></div>
     </section>
 
     <section class="card">

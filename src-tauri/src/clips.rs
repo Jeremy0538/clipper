@@ -72,3 +72,62 @@ pub fn list(clips_dir: &Path) -> Vec<ClipInfo> {
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out
 }
+
+/// A clip path from the UI, only if it really is a file inside the clips folder.
+pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let dir = fs::canonicalize(clips_dir).map_err(|e| e.to_string())?;
+    let p = fs::canonicalize(path).map_err(|_| "That clip no longer exists".to_string())?;
+    if p.parent() != Some(dir.as_path()) || !p.is_file() {
+        return Err("Not a clip in the clips folder".into());
+    }
+    Ok(p)
+}
+
+pub fn trash(p: &Path) -> Result<(), String> {
+    trash::delete(p).map_err(|e| e.to_string())
+}
+
+/// Put the file itself on the clipboard (paste into Discord / Explorer).
+pub fn copy_file(p: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const NO_WINDOW: u32 = 0x0800_0000;
+        let lit = p.to_string_lossy().replace('\'', "''");
+        let ok = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Set-Clipboard -LiteralPath '{lit}'")])
+            .creation_flags(NO_WINDOW)
+            .status()
+            .map_err(|e| e.to_string())?
+            .success();
+        if ok { Ok(()) } else { Err("Copy failed".into()) }
+    }
+    #[cfg(not(windows))]
+    {
+        let uri = format!("file://{}", p.display());
+        let ok = std::process::Command::new("wl-copy")
+            .args(["--type", "text/uri-list", &uri])
+            .status()
+            .map_err(|e| e.to_string())?
+            .success();
+        if ok { Ok(()) } else { Err("Copy failed".into()) }
+    }
+}
+
+pub fn reveal(p: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(p.parent().unwrap_or(p))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
