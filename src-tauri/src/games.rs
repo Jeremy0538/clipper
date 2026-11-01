@@ -166,15 +166,17 @@ impl Detector {
     }
 }
 
-/// Windows: keep only processes that own a real window; the biggest window wins
-/// (skips launchers' helper processes, crash handlers, anti-cheat services).
+/// Windows: prefer the process with the biggest window (skips launchers' helper
+/// processes, crash handlers, anti-cheat services). A game whose window is
+/// minimized or hidden (alt-tab, other app focused) still counts: the buffer
+/// must keep running until the process exits.
 #[cfg(windows)]
 fn pick(candidates: Vec<(String, u32)>) -> Option<Game> {
     candidates
         .into_iter()
-        .filter_map(|(name, pid)| {
-            let w = win::main_window(pid)?;
-            Some((w.area, Game { name, pid, obs_window: w.obs_string() }))
+        .map(|(name, pid)| match win::main_window(pid) {
+            Some(w) => (w.area, Game { name, pid, obs_window: w.obs_string() }),
+            None => (-1, Game { name, pid, obs_window: String::new() }),
         })
         .max_by_key(|(area, _)| *area)
         .map(|(_, g)| g)
@@ -195,7 +197,7 @@ mod win {
         Foundation::{HWND, LPARAM, RECT},
         UI::WindowsAndMessaging::{
             EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-            IsWindowVisible, GetWindow, GW_OWNER,
+            IsWindowVisible, GetWindow, GW_OWNER, IsIconic, GetWindowPlacement, WINDOWPLACEMENT,
         },
     };
 
@@ -226,8 +228,16 @@ mod win {
         if pid == s.pid && IsWindowVisible(hwnd).as_bool()
             && GetWindow(hwnd, GW_OWNER).map(|o| o.0.is_null()).unwrap_or(true)
         {
+            // A minimized window's rect is a tiny strip: use its restored size.
             let mut r = RECT::default();
-            if GetWindowRect(hwnd, &mut r).is_ok() {
+            let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            let got = if IsIconic(hwnd).as_bool() && GetWindowPlacement(hwnd, &mut wp).is_ok() {
+                r = wp.rcNormalPosition;
+                true
+            } else {
+                GetWindowRect(hwnd, &mut r).is_ok()
+            };
+            if got {
                 let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
                 if area >= 320 * 240 && s.best.is_none_or(|(_, a)| area > a) {
                     s.best = Some((hwnd, area));

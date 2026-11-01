@@ -15,7 +15,7 @@ pub async fn run(app: AppHandle) {
     let mut det = Some(Detector::new());
     let mut current: Option<crate::games::Game> = None;
     let mut misses = 0u32;
-    let mut targeted: Option<(u32, u64)> = None; // (pid, OBS session)
+    let mut targeted: Option<(u32, u64, String)> = None; // (pid, OBS session, window)
     let mut auto_started = false;
 
     loop {
@@ -44,6 +44,12 @@ pub async fn run(app: AppHandle) {
                     let name = g.name.clone();
                     set_status(&app, |s| s.game = Some(name)).await;
                     current = Some(g);
+                } else if let Some(c) = current.as_mut() {
+                    // Same game; remember its window once it has one (late window,
+                    // or restored from minimized) so OBS can be pointed at it.
+                    if !g.obs_window.is_empty() && g.obs_window != c.obs_window {
+                        c.obs_window = g.obs_window;
+                    }
                 }
             }
             None => {
@@ -73,7 +79,9 @@ pub async fn run(app: AppHandle) {
         }
 
         let session = st.obs_session.load(Ordering::SeqCst);
-        if targeted != Some((game.pid, session)) {
+        let want = (game.pid, session, game.obs_window.clone());
+        // Only retarget when we know a window; never point OBS at "" mid-game.
+        if targeted.as_ref() != Some(&want) && !(cfg!(windows) && game.obs_window.is_empty()) {
             if cfg!(windows) {
                 for input in [crate::obs::setup::GAME_CAPTURE, crate::obs::setup::GAME_AUDIO] {
                     let r = st.obs.client.call("SetInputSettings", json!({
@@ -88,7 +96,7 @@ pub async fn run(app: AppHandle) {
                     }
                 }
             }
-            targeted = Some((game.pid, session));
+            targeted = Some(want);
         }
 
         if !buffer && !st.user_stopped.load(Ordering::SeqCst) {
