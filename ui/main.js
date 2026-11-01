@@ -22,8 +22,13 @@ for (const tab of document.querySelectorAll(".tab")) {
 // ---------- status ----------
 function render() {
   const ready = status.obs === "ready";
-  $("obs").textContent = "OBS: " + (status.obs || "…");
+  const err = (status.obs || "").startsWith("error");
+  $("obs").textContent = "OBS: " + (err ? "error" : status.obs || "…");
+  $("obs").title = "OBS: " + (status.obs || "…");
   $("obs").classList.toggle("on", ready);
+  $("obs").classList.toggle("bad", err);
+  if (err) say("OBS problem: " + status.obs.replace(/^error:\s*/, ""));
+  $("game").title = status.game || "No game";
   $("game").textContent = status.game || "No game";
   $("game").classList.toggle("on", !!status.game);
   $("buffer").textContent = "Buffer: " + (status.buffer ? "recording" : "off");

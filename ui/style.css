@@ -24,14 +24,17 @@
 html, body { height:100%; }
 html { border:1px solid var(--accent); box-sizing:border-box; overflow:hidden; }
 body { display:flex; flex-direction:column; margin:0; background:var(--bg); color:var(--fg); font:14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
-header { flex:none; user-select:none; display:flex; align-items:center; gap:10px; padding:8px 0 8px 18px; background:var(--header); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+header { flex:none; user-select:none; display:flex; align-items:center; gap:10px; padding:8px 0 8px 18px; background:var(--header); border-bottom:1px solid var(--line); flex-wrap:nowrap; min-width:0; }
+header > * { flex:none; }
+header .spacer { flex:1 1 0; min-width:8px; }
 h1 { font-size:18px; margin:0 8px 0 0; }
 nav { display:flex; gap:4px; }
 .tab { background:transparent; border-color:transparent; color:var(--dim); }
 .tab.active { background:var(--line); color:var(--fg); }
 .spacer { flex:1; }
-.pill { padding:3px 10px; border-radius:999px; background:var(--line); color:var(--dim); font-size:12px; }
+.pill { flex:0 1 auto !important; min-width:0; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 10px; border-radius:999px; background:var(--line); color:var(--dim); font-size:12px; }
 .pill.on { background:var(--ok); color:var(--on-ok); }
+.pill.bad { background:var(--danger); color:var(--bg); }
 button { border:1px solid var(--ctl-border); border-radius:6px; padding:7px 14px; background:var(--ctl); color:var(--fg); cursor:pointer; font:inherit; }
 button:hover:not(:disabled) { filter:brightness(1.06); }
 button:disabled { opacity:.5; cursor:default; }

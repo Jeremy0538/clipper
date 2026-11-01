@@ -3,6 +3,18 @@
 // export through the app (ffmpeg). Loaded after main.js and uses its helpers.
 const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false };
 const edv = $("ed-video");
+// Seeking a big clip is slow: never queue seeks. While one runs, remember only
+// the latest wanted time and jump there when it finishes.
+let seekWanted = null;
+function seekTo(t) {
+  ed.shownTime = t;
+  if (edv.seeking) { seekWanted = t; return; }
+  edv.currentTime = t;
+}
+edv.addEventListener("seeked", () => {
+  if (seekWanted !== null) { const t = seekWanted; seekWanted = null; edv.currentTime = t; }
+  else ed.shownTime = null;
+});
 const fmtT = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 
 function showView(name) {
@@ -94,8 +106,9 @@ function renderTimeline() {
   $("ed-range").style.width = pct(ed.end - ed.start);
   $("ed-h-start").style.left = pct(ed.start);
   $("ed-h-end").style.left = pct(ed.end);
-  $("ed-playhead").style.left = pct(edv.currentTime || 0);
-  $("ed-time").textContent = `${fmtT(edv.currentTime || 0)} / ${fmtT(d)}`;
+  const now = ed.shownTime ?? edv.currentTime ?? 0;   // follow the mouse while seeking
+  $("ed-playhead").style.left = pct(now);
+  $("ed-time").textContent = `${fmtT(now)} / ${fmtT(d)}`;
   $("ed-length").textContent = "Length " + fmtT(ed.end - ed.start);
 }
 
@@ -113,9 +126,9 @@ $("ed-timeline").onpointerdown = (ev) => {
 $("ed-timeline").onpointermove = (ev) => {
   if (!dragging) return;
   const t = timeAt(ev);
-  if (dragging === "start") { ed.start = Math.min(t, ed.end - 0.5); edv.currentTime = ed.start; }
-  else if (dragging === "end") { ed.end = Math.max(t, ed.start + 0.5); edv.currentTime = ed.end; }
-  else edv.currentTime = Math.max(ed.start, Math.min(t, ed.end));
+  if (dragging === "start") { ed.start = Math.min(t, ed.end - 0.5); seekTo(ed.start); }
+  else if (dragging === "end") { ed.end = Math.max(t, ed.start + 0.5); seekTo(ed.end); }
+  else seekTo(Math.max(ed.start, Math.min(t, ed.end)));
   renderTimeline();
 };
 $("ed-timeline").onpointerup = () => { dragging = null; };
@@ -139,8 +152,8 @@ window.addEventListener("keydown", (e) => {
   if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.code === "KeyI") setStart();
   else if (e.code === "KeyO") setEnd();
-  else if (e.code === "ArrowLeft") edv.currentTime = Math.max(0, edv.currentTime - 1);
-  else if (e.code === "ArrowRight") edv.currentTime = Math.min(ed.info.duration, edv.currentTime + 1);
+  else if (e.code === "ArrowLeft") seekTo(Math.max(0, (ed.shownTime ?? edv.currentTime) - 1));
+  else if (e.code === "ArrowRight") seekTo(Math.min(ed.info.duration, (ed.shownTime ?? edv.currentTime) + 1));
 });
 
 async function closeEditor() {

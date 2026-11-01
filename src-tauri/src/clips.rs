@@ -117,8 +117,11 @@ pub fn copy_file(p: &Path) -> Result<(), String> {
 pub fn reveal(p: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
+        // explorer parses its own command line: /select,"C:\path with spaces.mp4"
+        // must not be wrapped in quotes as a whole (that opens Documents).
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", p.display()))
+            .raw_arg(format!("/select,\"{}\"", p.display()))
             .spawn()
             .map_err(|e| e.to_string())?;
     }
