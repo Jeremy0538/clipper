@@ -203,7 +203,15 @@ function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   $("theme").value = t;
   try { localStorage.setItem("theme", t); } catch {}
+  syncFrame();
 }
+// The window border: drawn by Windows 11 (rounded) when possible, else by the page.
+async function syncFrame() {
+  const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+  const native = await invoke("set_frame_color", { color: accent }).catch(() => false);
+  document.documentElement.classList.toggle("native-frame", !!native);
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncFrame);
 try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch {}
 $("theme").onchange = (e) => { applyTheme(e.target.value); invoke("set_theme", { theme: e.target.value }).catch(say); };
 

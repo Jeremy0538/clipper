@@ -4,6 +4,7 @@ mod clips;
 mod editor;
 mod tools;
 mod games;
+mod gpu;
 mod hotkey;
 mod installer;
 mod log;
@@ -441,6 +442,39 @@ fn ui_log(msg: String) {
     clog!("ui: {}", msg.chars().take(500).collect::<String>());
 }
 
+/// Windows 11 draws the window border itself (follows the rounded corners), in
+/// the theme's accent colour. Returns false where that isn't supported, so the
+/// page keeps its own border.
+#[tauri::command]
+fn set_frame_color(app: AppHandle, color: String) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::{COLORREF, HWND},
+            Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND},
+        };
+        let hex = color.trim().trim_start_matches('#');
+        let Ok(rgb) = u32::from_str_radix(hex, 16) else { return false };
+        // COLORREF is 0x00BBGGRR.
+        let cref = COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF));
+        let Some(w) = app.get_webview_window("main") else { return false };
+        let Ok(h) = w.hwnd() else { return false };
+        let hwnd = HWND(h.0);
+        unsafe {
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&corner) as u32);
+            return DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR,
+                &cref as *const _ as *const std::ffi::c_void, std::mem::size_of::<COLORREF>() as u32).is_ok();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, color);
+        false
+    }
+}
+
 #[tauri::command]
 fn open_log_folder() -> Result<(), String> {
     let dir = log::path().and_then(|p| p.parent()).ok_or("no log folder")?;
@@ -516,6 +550,19 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
     clog!("editor: saved {}", out.display());
     let _ = app.emit("clip-saved", out.to_string_lossy());
     Ok(out.to_string_lossy().into_owned())
+}
+
+/// Keyframe images for instant scrubbing; made after the editor is open.
+#[tauri::command]
+async fn editor_thumbs(app: AppHandle) -> Result<Vec<(f64, String)>, String> {
+    let st = app.state::<AppState>();
+    let info = st.editor.lock().await.clone().ok_or("No clip is open in the editor")?;
+    let tools = tools_for(&app).await?;
+    let cache = st.obs.data_dir.join("editor-cache");
+    let t0 = std::time::Instant::now();
+    let th = editor::keyframe_thumbs(&tools, std::path::Path::new(&info.path), &cache, info.start).await;
+    clog!("editor: {} scrub images in {:.1} s", th.len(), t0.elapsed().as_secs_f64());
+    Ok(th)
 }
 
 /// One extracted audio track as raw bytes (decoded by WebAudio in the editor).
@@ -668,7 +715,7 @@ pub fn run() {
             remove_custom_game, set_meters,
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
-            editor_open, editor_export, editor_close, editor_track, ui_log
+            editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

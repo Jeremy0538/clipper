@@ -40,6 +40,29 @@ pub struct ClipInfo {
     pub height: u32,
     /// Sources with their own volume (for a single-track clip: that one track).
     pub sources: Vec<Track>,
+    /// Small keyframe images for instant scrubbing: (time in s, file).
+    pub thumbs: Vec<(f64, String)>,
+    /// Container start time (keyframe times are relative to it).
+    pub start: f64,
+}
+
+/// One small image per keyframe (≈ every second). Only keyframes are decoded,
+/// so this takes a few seconds even for a 5-minute 1440p clip.
+pub async fn keyframe_thumbs(tools: &Tools, path: &Path, cache: &Path, start: f64) -> Vec<(f64, String)> {
+    let mut c = command(&tools.ffmpeg);
+    c.args(["-hide_banner", "-v", "info", "-hwaccel", "auto", "-skip_frame", "nokey", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-an", "-vf", "scale=640:-2,showinfo", "-fps_mode", "passthrough", "-q:v", "7"])
+        .arg(cache.join("k%05d.jpg"));
+    let Ok(out) = c.stdin(Stdio::null()).output().await else { return vec![] };
+    let log = String::from_utf8_lossy(&out.stderr);
+    log.lines()
+        .filter(|l| l.contains("Parsed_showinfo") && l.contains(" n:"))
+        .filter_map(|l| l.split("pts_time:").nth(1)?.split_whitespace().next()?.parse::<f64>().ok())
+        .enumerate()
+        .map(|(i, t)| ((t - start).max(0.0), cache.join(format!("k{:05}.jpg", i + 1)).to_string_lossy().into_owned()))
+        .filter(|(_, f)| Path::new(f).exists())
+        .collect()
 }
 
 #[derive(Deserialize, Debug)]
@@ -77,7 +100,7 @@ fn track_name(pos: usize, tags: &serde_json::Value, total: usize) -> String {
 pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> {
     let mut c = command(&tools.ffprobe);
     c.args(["-v", "error", "-show_entries",
-            "format=duration:stream=index,codec_type,width,height:stream_tags=name,title,handler_name",
+            "format=duration,start_time:stream=index,codec_type,width,height:stream_tags=name,title,handler_name",
             "-of", "json"]).arg(path);
     let probe: serde_json::Value = serde_json::from_slice(&run(c).await?.stdout)?;
     let duration: f64 = probe["format"]["duration"].as_str().and_then(|d| d.parse().ok()).context("no duration")?;
@@ -105,12 +128,8 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
             });
         }
         run(c).await.context("could not read the audio tracks")?;
-        if sources.iter().any(|t| t.name.eq_ignore_ascii_case("Desktop")) {
-            for t in &mut sources {
-                t.in_mix = t.name.eq_ignore_ascii_case("Desktop") || t.name.eq_ignore_ascii_case("Mic");
-            }
-        }
     }
+    let start: f64 = probe["format"]["start_time"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0);
     Ok(ClipInfo {
         path: path.to_string_lossy().into_owned(),
         name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -118,6 +137,8 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
         width: video["width"].as_u64().unwrap_or(0) as u32,
         height: video["height"].as_u64().unwrap_or(0) as u32,
         sources,
+        thumbs: vec![],
+        start,
     })
 }
 
@@ -200,7 +221,8 @@ pub async fn export(
         let mut c = command(&tools.ffmpeg);
         c.args(["-hide_banner", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]);
         if trimmed {
-            c.args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
+            // GPU decoding for the part that gets re-encoded (falls back to CPU by itself).
+            c.args(["-hwaccel", "auto", "-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
         }
         c.arg("-i").arg(src);
         let mut graph = String::new();
@@ -230,8 +252,11 @@ pub async fn export(
         match (trimmed, encoder) {
             (false, _) => { c.args(["-c:v", "copy"]); }
             (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]); }
+            (true, "h264_amf") => { c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23", "-g", "60"]); }
+            (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]); }
             (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]); }
         }
+        c.args(["-pix_fmt", "yuv420p"]);
         if !keep.is_empty() {
             c.args(["-c:a:0", "aac", "-b:a:0", "192k", "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
             let sources_mapped = keep.len() > 1 || info.sources.len() > 1;
@@ -254,7 +279,9 @@ pub async fn export(
 
     let length = (end - start).max(0.1);
     let mut last_err = None;
-    for encoder in ["h264_nvenc", "libx264"] {
+    let gpu = crate::gpu::detect().ffmpeg_encoder();
+    let encoders: Vec<&'static str> = if gpu == "libx264" { vec!["libx264"] } else { vec![gpu, "libx264"] };
+    for encoder in encoders {
         let mut child = attempt(encoder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let stdout = child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();

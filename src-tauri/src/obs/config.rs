@@ -23,11 +23,13 @@ pub struct Settings {
     pub audio: crate::settings::AudioSettings,
     /// "high" | "balanced" | "small"
     pub quality: String,
+    /// The GPU encoder failed to start: use x264 on the CPU.
+    pub force_cpu: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default(), quality: "balanced".into() }
+        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000, audio: Default::default(), quality: "balanced".into(), force_cpu: false }
     }
 }
 
@@ -79,16 +81,37 @@ fn ini_path(p: &Path) -> String {
 
 /// Same resolution for every level; only the bitrate changes. VBR spends bits
 /// where the picture needs them, so "balanced" is about half of "high".
+pub fn vendor(s: &Settings) -> crate::gpu::Vendor {
+    if s.force_cpu { crate::gpu::Vendor::Cpu } else { crate::gpu::detect() }
+}
+
 fn encoder_settings(s: &Settings) -> serde_json::Value {
+    use crate::gpu::Vendor;
     let (rc, bitrate, max) = match s.quality.as_str() {
         "high" => ("CBR", s.bitrate_kbps, s.bitrate_kbps),
         "small" => ("VBR", 12_000, 20_000),
         _ => ("VBR", 20_000, 35_000),
     };
-    serde_json::json!({
-        "rate_control": rc, "bitrate": bitrate, "max_bitrate": max,
-        "keyint_sec": 1, "preset2": "p5", "profile": "high", "bf": 2, "lookahead": true,
-    })
+    match vendor(s) {
+        Vendor::Nvidia => serde_json::json!({
+            "rate_control": rc, "bitrate": bitrate, "max_bitrate": max,
+            "keyint_sec": 1, "preset2": "p5", "profile": "high", "bf": 2, "lookahead": true,
+        }),
+        Vendor::Amd => serde_json::json!({
+            "rate_control": rc, "bitrate": bitrate, "max_bitrate": max,
+            "keyint_sec": 1, "preset": "quality", "profile": "high", "bf": 2,
+        }),
+        Vendor::Intel => serde_json::json!({
+            "rate_control": rc, "bitrate": bitrate, "max_bitrate": max,
+            "keyint_sec": 1, "target_usage": "TU4", "profile": "high",
+        }),
+        // CPU: quality-based so a slower PC doesn't also get huge files.
+        Vendor::Cpu => serde_json::json!({
+            "rate_control": "CRF",
+            "crf": match s.quality.as_str() { "high" => 18, "small" => 26, _ => 22 },
+            "keyint_sec": 1, "preset": "veryfast", "profile": "high",
+        }),
+    }
 }
 
 /// Websocket password: generated once, kept in our data dir.
@@ -144,13 +167,14 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
         format!(
             "[General]\nName={PROFILE}\n\n\
              [Output]\nMode=Advanced\nFilenameFormatting=Clip %CCYY-%MM-%DD %hh-%mm-%ss\nDelayEnable=false\n\n\
-             [AdvOut]\nRecType=Standard\nRecFilePath={rec}\nRecFormat2=mp4\nRecEncoder=obs_nvenc_h264_tex\n\
+             [AdvOut]\nRecType=Standard\nRecFilePath={rec}\nRecFormat2=mp4\nRecEncoder={encoder}\n\
              RecTracks={tracks}\nRecRB=true\nRecRBTime={secs}\nRecRBSize=8192\nRecRBPrefix=Replay\n\
              Track1Name=Mix\nTrack2Name=Game\nTrack3Name=Discord\nTrack4Name=Mic\n\n\
              [Video]\nBaseCX={w}\nBaseCY={h}\nOutputCX={w}\nOutputCY={h}\nFPSType=0\nFPSCommon={fps}\n\n\
              [Audio]\nSampleRate=48000\nChannelSetup=Stereo\n",
             rec = ini_path(incoming),
             tracks = super::setup::track_mask(&s.audio),
+            encoder = vendor(s).obs_encoder(),
             secs = s.buffer_secs,
             w = s.width,
             h = s.height,

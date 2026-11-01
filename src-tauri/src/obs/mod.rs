@@ -212,6 +212,21 @@ impl ObsManager {
         }
     }
 
+    /// The GPU encoder could not start: switch to x264 once and restart OBS.
+    /// Returns false if that already happened.
+    pub fn fall_back_to_cpu(&self) -> bool {
+        {
+            let mut s = self.settings.lock().unwrap();
+            if s.force_cpu {
+                return false;
+            }
+            s.force_cpu = true;
+        }
+        crate::clog!("GPU encoder failed: switching to CPU encoding (x264)");
+        self.restart();
+        true
+    }
+
     /// Restart OBS so it picks up new encoder settings (only while it's idle).
     pub fn restart(&self) {
         let Some(pid) = *self.pid.lock().unwrap() else { return };

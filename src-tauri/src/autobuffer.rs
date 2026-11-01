@@ -90,11 +90,19 @@ pub async fn run(app: AppHandle) {
             if cfg!(windows) {
                 let app_audio = st.obs.settings.lock().unwrap().audio.game_mode
                     == crate::settings::GameAudioMode::Game;
-                let inputs: &[&str] = if app_audio {
-                    &[crate::obs::setup::GAME_CAPTURE, crate::obs::setup::GAME_AUDIO]
-                } else {
-                    &[crate::obs::setup::GAME_CAPTURE]
-                };
+                use crate::obs::setup::{GAME_AUDIO, GAME_CAPTURE, WINDOW_CAPTURE};
+                // Games are hooked (Game Capture); added apps are captured as a window.
+                let (video, other) = if game.custom { (WINDOW_CAPTURE, GAME_CAPTURE) } else { (GAME_CAPTURE, WINDOW_CAPTURE) };
+                for (input, on) in [(video, true), (other, false)] {
+                    if let Ok(v) = st.obs.client.call("GetSceneItemId",
+                        json!({ "sceneName": crate::obs::config::SCENE, "sourceName": input })).await
+                    {
+                        let _ = st.obs.client.call("SetSceneItemEnabled", json!({
+                            "sceneName": crate::obs::config::SCENE, "sceneItemId": v["sceneItemId"], "sceneItemEnabled": on,
+                        })).await;
+                    }
+                }
+                let inputs: &[&str] = if app_audio { &[video, GAME_AUDIO] } else { &[video] };
                 for &input in inputs {
                     let r = st.obs.client.call("SetInputSettings", json!({
                         "inputName": input,
@@ -120,7 +128,14 @@ pub async fn run(app: AppHandle) {
                     auto_started = true;
                     clog!("buffer auto-started for {}", game.name);
                 }
-                Err(e) => report_error(&app, format!("Could not start the buffer: {e:#}")),
+                Err(e) => {
+                    // Usually the GPU encoder (old driver, unsupported card): retry on the CPU.
+                    if st.obs.fall_back_to_cpu() {
+                        crate::notify::info(&app, "Using CPU encoding", "The GPU encoder could not start");
+                    } else {
+                        report_error(&app, format!("Could not start clipping: {e:#}"));
+                    }
+                }
             }
         }
     }

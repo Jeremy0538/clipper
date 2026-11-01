@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path};
 
 pub const GAME_CAPTURE: &str = "Game Capture";
+/// For apps the user added: Game Capture only hooks real (DirectX/OpenGL) games.
+pub const WINDOW_CAPTURE: &str = "Window Capture";
 pub const GAME_AUDIO: &str = "Game Audio";
 pub const DISCORD: &str = "Discord";
 pub const MIC: &str = "Mic";
@@ -51,17 +53,14 @@ fn mic_filters(a: &AudioSettings) -> Vec<(&'static str, &'static str, Value)> {
     f
 }
 
-/// Track numbers: Discord and extra apps are already part of "everything I
-/// hear", so in that mode they get their own track but stay out of the Mix.
-fn tracks(own: u8, a: &AudioSettings) -> &'static [u8] {
-    let desktop = a.game_mode == GameAudioMode::Desktop;
-    match (own, desktop) {
-        (3, false) => &[1, 3],
-        (3, true) => &[3],
-        (5, false) => &[1, 5],
-        (5, true) => &[5],
-        (6, false) => &[1, 6],
-        (6, true) => &[6],
+/// Track numbers: every source goes into the Mix plus its own track.
+/// (Discord/apps are NOT assumed to be part of "everything I hear": they often
+/// play on another device, e.g. a headset, and would vanish from the Mix.)
+fn tracks(own: u8, _a: &AudioSettings) -> &'static [u8] {
+    match own {
+        3 => &[1, 3],
+        5 => &[1, 5],
+        6 => &[1, 6],
         _ => &[],
     }
 }

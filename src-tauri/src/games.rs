@@ -14,6 +14,8 @@ pub struct Game {
     pub pid: u32,
     /// OBS window string "title:class:exe" (Windows only; empty elsewhere).
     pub obs_window: String,
+    /// An app the user added (not a game): captured as a window, not hooked.
+    pub custom: bool,
 }
 
 /// Steam folders that live in steamapps/common but are not games.
@@ -149,7 +151,7 @@ impl Detector {
                 .with_cmd(UpdateKind::OnlyIfNotSet),
         );
 
-        let mut candidates: Vec<(String, u32)> = vec![];
+        let mut candidates: Vec<(String, u32, bool)> = vec![];
         for (pid, p) in self.sys.processes() {
             if p.thread_kind().is_some() {
                 continue; // Linux threads show up as processes
@@ -162,6 +164,7 @@ impl Detector {
                 let e = c.exe.to_lowercase();
                 pname == e || pname == e.trim_end_matches(".exe")
             });
+            let is_custom = custom_name.is_some();
             let name = if let Some(c) = custom_name {
                 Some(c.name.as_str())
             } else if matches!(pname.as_str(), "java" | "javaw" | "java.exe" | "javaw.exe")
@@ -177,7 +180,7 @@ impl Detector {
             };
             if let Some(n) = name {
                 if !disabled.iter().any(|d| d.eq_ignore_ascii_case(n)) {
-                    candidates.push((n.to_string(), pid.as_u32()));
+                    candidates.push((n.to_string(), pid.as_u32(), is_custom));
                 }
             }
         }
@@ -248,23 +251,23 @@ pub fn running_apps() -> Vec<AppRef> {
 /// minimized or hidden (alt-tab, other app focused) still counts: the buffer
 /// must keep running until the process exits.
 #[cfg(windows)]
-fn pick(candidates: Vec<(String, u32)>) -> Option<Game> {
+fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
     candidates
         .into_iter()
-        .map(|(name, pid)| match win::main_window(pid) {
-            Some(w) => (w.area, Game { name, pid, obs_window: w.obs_string() }),
-            None => (-1, Game { name, pid, obs_window: String::new() }),
+        .map(|(name, pid, custom)| match win::main_window(pid) {
+            Some(w) => (w.area, Game { name, pid, obs_window: w.obs_string(), custom }),
+            None => (-1, Game { name, pid, obs_window: String::new(), custom }),
         })
         .max_by_key(|(area, _)| *area)
         .map(|(_, g)| g)
 }
 
 #[cfg(not(windows))]
-fn pick(candidates: Vec<(String, u32)>) -> Option<Game> {
+fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
     candidates
         .into_iter()
         .next()
-        .map(|(name, pid)| Game { name, pid, obs_window: String::new() })
+        .map(|(name, pid, custom)| Game { name, pid, obs_window: String::new(), custom })
 }
 
 #[cfg(windows)]

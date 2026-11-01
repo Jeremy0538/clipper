@@ -9,6 +9,7 @@ use serde_json::json;
 pub const SCREEN_SCENE: &str = "Screen";
 pub const ALL: &str = "all";
 pub const PRIMARY: &str = "primary";
+const MAX_SIDE: f64 = 4096.0;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct Monitor {
@@ -40,8 +41,8 @@ pub async fn list_monitors(obs: &ObsClient) -> Result<Vec<Monitor>> {
     if !cfg!(windows) {
         // Development stand-in: two fake screens side by side.
         return Ok(vec![
-            Monitor { id: "dev-a".into(), name: "Dev screen A: 1920x1080 @ 0,0 (Primary Monitor)".into(), x: 0, y: 0, w: 1920, h: 1080, primary: true },
-            Monitor { id: "dev-b".into(), name: "Dev screen B: 1280x720 @ 1920,0".into(), x: 1920, y: 0, w: 1280, h: 720, primary: false },
+            Monitor { id: "dev-a".into(), name: "Dev screen A: 3440x1440 @ 0,0 (Primary Monitor)".into(), x: 0, y: 0, w: 3440, h: 1440, primary: true },
+            Monitor { id: "dev-b".into(), name: "Dev screen B: 2560x1440 @ 3440,0".into(), x: 3440, y: 0, w: 2560, h: 1440, primary: false },
         ]);
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
@@ -88,8 +89,12 @@ pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Re
     anyhow::ensure!(!chosen.is_empty(), "No monitors found");
     let min_x = chosen.iter().map(|m| m.x).min().unwrap();
     let min_y = chosen.iter().map(|m| m.y).min().unwrap();
-    let w = chosen.iter().map(|m| (m.x - min_x) as u32 + m.w).max().unwrap() & !1;
-    let h = chosen.iter().map(|m| (m.y - min_y) as u32 + m.h).max().unwrap() & !1;
+    let full_w = chosen.iter().map(|m| (m.x - min_x) as u32 + m.w).max().unwrap();
+    let full_h = chosen.iter().map(|m| (m.y - min_y) as u32 + m.h).max().unwrap();
+    // OBS (and H.264) allow at most 4096 px per side: shrink a wide desk to fit.
+    let scale = (MAX_SIDE / full_w as f64).min(MAX_SIDE / full_h as f64).min(1.0);
+    let w = ((full_w as f64 * scale).round() as u32) & !1;
+    let h = ((full_h as f64 * scale).round() as u32) & !1;
 
     // Fresh scene every time: the monitor layout may have changed.
     let scenes = obs.call("GetSceneList", json!({})).await?;
@@ -131,7 +136,10 @@ pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Re
             .clone();
         obs.call("SetSceneItemTransform", json!({
             "sceneName": SCREEN_SCENE, "sceneItemId": id,
-            "sceneItemTransform": { "positionX": m.x - min_x, "positionY": m.y - min_y, "alignment": 5 },
+            "sceneItemTransform": {
+                "positionX": (m.x - min_x) as f64 * scale, "positionY": (m.y - min_y) as f64 * scale,
+                "scaleX": scale, "scaleY": scale, "alignment": 5,
+            },
         }))
         .await?;
     }

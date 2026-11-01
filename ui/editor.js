@@ -3,6 +3,29 @@
 // export through the app (ffmpeg). Loaded after main.js and uses its helpers.
 const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false };
 const edv = $("ed-video");
+// While dragging, show the nearest keyframe image instantly and only seek the
+// real video when the mouse is released (seeking a big clip is slow).
+function thumbAt(t) {
+  const th = ed.info?.thumbs || [];
+  if (!th.length) return null;
+  let lo = 0, hi = th.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (th[mid][0] <= t) lo = mid; else hi = mid - 1; }
+  return th[lo][1];
+}
+function preview(t) {
+  ed.shownTime = t;
+  const f = thumbAt(t);
+  if (!f) return seekTo(t);   // no images: fall back to seeking
+  $("ed-scrub").src = convertFileSrc(f);
+  $("ed-scrub").classList.add("on");
+}
+function endPreview() {
+  if (ed.shownTime == null) return;
+  const t = ed.shownTime;
+  edv.addEventListener("seeked", () => $("ed-scrub").classList.remove("on"), { once: true });
+  seekTo(t);
+}
+
 // Seeking a big clip is slow: never queue seeks. While one runs, remember only
 // the latest wanted time and jump there when it finishes.
 let seekWanted = null;
@@ -31,6 +54,7 @@ async function openEditor(c) {
   try {
     const info = await invoke("editor_open", { path: c.path });
     ed.info = info; ed.start = 0; ed.end = info.duration;
+    $("ed-scrub").classList.remove("on");
     edv.src = convertFileSrc(info.path);
     ed.ctx = ed.ctx || new AudioContext();
     ed.tracks = [];
@@ -43,6 +67,12 @@ async function openEditor(c) {
     }
     renderTracks();
     renderTimeline();
+    const forPath = info.path;
+    invoke("editor_thumbs").then((th) => {
+      if (ed.info?.path !== forPath) return;
+      ed.info.thumbs = th;
+      for (const [, f] of th.slice(0, 400)) { new Image().src = convertFileSrc(f); }   // warm the cache
+    }).catch((e) => uiLog("scrub images: " + e));
     uiLog(`editor ready: ${ed.tracks.length} tracks decoded (${ed.tracks.map((t) => `${t.s.name} ${t.buf.duration.toFixed(1)}s`).join(", ")})`);
     $("ed-status").textContent = "";
     $("ed-export").disabled = false;
@@ -88,6 +118,7 @@ function startAudio() {
 }
 edv.onplay = () => { $("ed-play").textContent = "Pause"; startAudio(); };
 edv.onpause = () => { $("ed-play").textContent = "Play"; stopAudio(); };
+edv.addEventListener("play", () => $("ed-scrub").classList.remove("on"));
 edv.onseeked = () => { if (!edv.paused) startAudio(); renderTimeline(); };
 setInterval(() => {   // drift correction
   if (edv.paused || !ed.playingFrom) return;
@@ -131,12 +162,13 @@ $("ed-timeline").onpointerdown = (ev) => {
 $("ed-timeline").onpointermove = (ev) => {
   if (!dragging) return;
   const t = timeAt(ev);
-  if (dragging === "start") { ed.start = Math.min(t, ed.end - 0.5); seekTo(ed.start); }
-  else if (dragging === "end") { ed.end = Math.max(t, ed.start + 0.5); seekTo(ed.end); }
-  else seekTo(Math.max(ed.start, Math.min(t, ed.end)));
+  if (dragging === "start") { ed.start = Math.min(t, ed.end - 0.5); preview(ed.start); }
+  else if (dragging === "end") { ed.end = Math.max(t, ed.start + 0.5); preview(ed.end); }
+  else preview(Math.max(ed.start, Math.min(t, ed.end)));
   renderTimeline();
 };
-$("ed-timeline").onpointerup = () => { dragging = null; };
+$("ed-timeline").onpointerup = () => { if (dragging) endPreview(); dragging = null; };
+$("ed-timeline").onpointercancel = $("ed-timeline").onpointerup;
 
 const togglePlay = () => {
   if (!ed.info) return;

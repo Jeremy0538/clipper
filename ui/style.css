@@ -86,7 +86,10 @@ button.small { padding:4px 10px; font-size:12px; font-weight:400; }
 .ed-head { display:flex; align-items:center; gap:10px; }
 #ed-title { font-weight:600; }
 #ed-status { color:var(--dim); }
-#ed-video { width:100%; max-height:55vh; background:#000; border-radius:8px; }
+#ed-stage { position:relative; }
+#ed-video { width:100%; max-height:55vh; background:#000; border-radius:8px; display:block; }
+#ed-scrub { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000; border-radius:8px; display:none; pointer-events:none; }
+#ed-scrub.on { display:block; }
 #ed-timeline { flex:none; position:relative; height:44px; background:var(--card); border:1px solid var(--line); border-radius:6px; cursor:pointer; touch-action:none; }
 #ed-range { position:absolute; top:0; bottom:0; background:color-mix(in srgb, var(--accent) 30%, transparent); border-left:2px solid var(--accent); border-right:2px solid var(--accent); pointer-events:none; }
 #ed-playhead { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--fg); pointer-events:none; }
@@ -136,3 +139,5 @@ input[type=range] { accent-color:var(--accent); }
 #statusbar .pill { max-width:240px; }
 #view-clips { padding-top:12px; }
 #view-settings { padding-top:14px; }
+
+html.native-frame { border:0; }
