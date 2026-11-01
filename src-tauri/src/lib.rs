@@ -1,11 +1,16 @@
 mod autobuffer;
 mod clips;
 mod games;
+mod hotkey;
+mod log;
+mod notify;
 mod obs;
+mod settings;
 
 use obs::{config::Settings, ws::DISCONNECTED, ObsManager};
 use serde::Serialize;
 use serde_json::json;
+use settings::{UserSettings, MAX_BUFFER_SECS, MIN_BUFFER_SECS};
 use std::{
     path::PathBuf,
     sync::{
@@ -36,6 +41,8 @@ pub struct AppState {
     pub obs_session: AtomicU64,
     /// The user stopped the buffer by hand during this game: don't auto-restart it.
     pub user_stopped: AtomicBool,
+    pub user: Mutex<UserSettings>,
+    pub settings_file: PathBuf,
 }
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
@@ -53,13 +60,29 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
+/// Log it, show it in the window and as a toast.
+pub(crate) fn report_error(app: &AppHandle, msg: impl Into<String>) {
+    let msg = msg.into();
+    clog!("ERROR {msg}");
+    let _ = app.emit("error", msg.clone());
+    notify::toast(app, false, "Clipper problem", msg);
+}
+
+pub(crate) async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
+    clog!("save requested");
     let st = app.state::<AppState>();
-    if !st.status.lock().await.buffer {
-        return Err("The replay buffer is not running".into());
+    let r = async {
+        if !st.status.lock().await.buffer {
+            return Err("The replay buffer is not running".to_string());
+        }
+        st.obs.client.call("SaveReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
+        Ok(())
     }
-    st.obs.client.call("SaveReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
-    Ok(())
+    .await;
+    if let Err(e) = &r {
+        report_error(app, format!("Could not save clip: {e}"));
+    }
+    r
 }
 
 #[tauri::command]
@@ -86,6 +109,101 @@ async fn save_clip(app: AppHandle) -> Result<(), String> {
     save_clip_inner(&app).await
 }
 
+#[derive(Serialize)]
+struct SettingsView {
+    hotkey: hotkey::Hotkey,
+    hotkey_label: String,
+    buffer_secs: u32,
+    max_buffer_secs: u32,
+    sound: bool,
+    toast: bool,
+}
+
+#[tauri::command]
+async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView, String> {
+    let u = state.user.lock().await;
+    Ok(SettingsView {
+        hotkey: u.hotkey.clone(),
+        hotkey_label: u.hotkey.label(),
+        buffer_secs: u.buffer_secs,
+        max_buffer_secs: MAX_BUFFER_SECS,
+        sound: u.sound,
+        toast: u.toast,
+    })
+}
+
+/// Returns the new key's label.
+#[tauri::command]
+async fn set_hotkey(state: tauri::State<'_, AppState>, hotkey: hotkey::Hotkey) -> Result<String, String> {
+    hotkey::apply(&hotkey)?;
+    clog!("clip key set to {}", hotkey.label());
+    let mut u = state.user.lock().await;
+    u.hotkey = hotkey;
+    u.save(&state.settings_file).map_err(|e| e.to_string())?;
+    Ok(u.hotkey.label())
+}
+
+/// Changing the length restarts a running buffer (OBS reads it on start).
+#[tauri::command]
+async fn set_buffer(state: tauri::State<'_, AppState>, secs: u32) -> Result<u32, String> {
+    let secs = secs.clamp(MIN_BUFFER_SECS, MAX_BUFFER_SECS);
+    {
+        let mut u = state.user.lock().await;
+        u.buffer_secs = secs;
+        u.save(&state.settings_file).map_err(|e| e.to_string())?;
+    }
+    state.obs.settings.lock().unwrap().buffer_secs = secs;
+    clog!("buffer length set to {secs} s");
+    let obs = &state.obs.client;
+    if !obs.is_connected().await {
+        return Ok(secs); // applied when OBS starts
+    }
+    let err = |e: anyhow::Error| e.to_string();
+    let was_running = obs.call("GetReplayBufferStatus", json!({})).await.map_err(err)?["outputActive"]
+        .as_bool()
+        .unwrap_or(false);
+    if was_running {
+        obs.call("StopReplayBuffer", json!({})).await.map_err(err)?;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let st = obs.call("GetReplayBufferStatus", json!({})).await.map_err(err)?;
+            if st["outputActive"] == false {
+                break;
+            }
+        }
+    }
+    obs.call("SetProfileParameter", json!({
+        "parameterCategory": "AdvOut", "parameterName": "RecRBTime", "parameterValue": secs.to_string(),
+    }))
+    .await
+    .map_err(err)?;
+    if was_running {
+        obs.call("StartReplayBuffer", json!({})).await.map_err(err)?;
+    }
+    Ok(secs)
+}
+
+/// sound | toast
+#[tauri::command]
+async fn set_option(state: tauri::State<'_, AppState>, name: String, value: bool) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    match name.as_str() {
+        "sound" => u.sound = value,
+        "toast" => u.toast = value,
+        _ => return Err(format!("unknown option {name}")),
+    }
+    clog!("option {name} = {value}");
+    u.save(&state.settings_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_log_folder() -> Result<(), String> {
+    let dir = log::path().and_then(|p| p.parent()).ok_or("no log folder")?;
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener).arg(dir).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
     clips::list(&state.clips_dir)
@@ -103,22 +221,34 @@ async fn watch_events(app: AppHandle) {
         match ev["eventType"].as_str().unwrap_or_default() {
             "ReplayBufferStateChanged" => {
                 let active = ev["eventData"]["outputActive"].as_bool().unwrap_or(false);
+                hotkey::set_armed(active);
+                let state = ev["eventData"]["outputState"].as_str().unwrap_or("?");
+                clog!("buffer {}", state.trim_start_matches("OBS_WEBSOCKET_OUTPUT_").to_lowercase());
+                if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
+                    notify::info(&app, "Buffer stopped", "");
+                }
                 set_status(&app, |s| s.buffer = active).await;
             }
             "ReplayBufferSaved" => {
                 let Some(src) = ev["eventData"]["savedReplayPath"].as_str() else { continue };
                 let st = app.state::<AppState>();
                 let game = st.status.lock().await.game.clone();
+                clog!("OBS wrote {src}");
                 match clips::adopt(src.as_ref(), &st.clips_dir, game.as_deref()) {
                     Ok(p) => {
+                        clog!("clip saved: {}", p.display());
+                        let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        notify::toast(&app, true, "Clip saved", name);
                         let _ = app.emit("clip-saved", p.to_string_lossy());
                     }
-                    Err(e) => {
-                        let _ = app.emit("error", format!("Could not store clip: {e:#}"));
-                    }
+                    Err(e) => report_error(&app, format!("Could not store clip: {e:#}")),
                 }
             }
-            DISCONNECTED => set_status(&app, |s| s.buffer = false).await,
+            DISCONNECTED => {
+                clog!("OBS websocket disconnected");
+                hotkey::set_armed(false);
+                set_status(&app, |s| s.buffer = false).await
+            }
             _ => {}
         }
     }
@@ -132,31 +262,10 @@ fn dir_from_env(var: &str) -> Option<PathBuf> {
 pub fn run() {
     let start_hidden = std::env::args().any(|a| a == "--hidden");
 
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default();
-
-    #[cfg(windows)]
-    {
-        use tauri_plugin_global_shortcut::ShortcutState;
-        builder = builder.plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, ev| {
-                    if ev.state() == ShortcutState::Pressed {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(e) = save_clip_inner(&app).await {
-                                let _ = app.emit("error", e);
-                            }
-                        });
-                    }
-                })
-                .build(),
-        );
-    }
-
-    let app = builder
+    let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            get_status, start_buffer, stop_buffer, save_clip, list_clips
+            get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
+            set_buffer, set_option, open_log_folder
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -170,9 +279,15 @@ pub fn run() {
             };
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&clips_dir)?;
+            log::init(data_dir.join("clipper.log"));
+            clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
 
+            let settings_file = data_dir.join("settings.json");
+            let user = UserSettings::load(&settings_file);
+            hotkey::apply(&user.hotkey)?;
+            hotkey::start(handle.clone());
             #[allow(unused_mut)]
-            let mut settings = Settings::default();
+            let mut settings = Settings { buffer_secs: user.buffer_secs, ..Settings::default() };
             // Canvas = primary monitor (games run there); even sizes for the encoder.
             #[cfg(windows)]
             if let Ok(Some(m)) = app.primary_monitor() {
@@ -186,6 +301,8 @@ pub fn run() {
                 status: Mutex::default(),
                 obs_session: AtomicU64::new(0),
                 user_stopped: AtomicBool::new(false),
+                user: Mutex::new(user),
+                settings_file,
             });
 
             // Tray
@@ -221,18 +338,17 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            #[cfg(windows)]
-            {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut};
-                if let Err(e) = app.global_shortcut().register(Shortcut::new(None, Code::F8)) {
-                    eprintln!("could not register F8: {e}");
-                }
-            }
-
             // OBS supervisor + event follower
             let h = handle.clone();
             tauri::async_runtime::spawn(obs.run(move |state| {
                 let h = h.clone();
+                // Download progress would spam the log every percent.
+                if !state.starts_with("downloading") || state.ends_with(" 0%") || state.ends_with("100%") {
+                    clog!("OBS: {state}");
+                }
+                if state.starts_with("error") {
+                    notify::toast(&h, false, "OBS problem", state.clone());
+                }
                 if state == "ready" {
                     h.state::<AppState>().obs_session.fetch_add(1, Ordering::SeqCst);
                 }
@@ -242,6 +358,7 @@ pub fn run() {
             }));
             tauri::async_runtime::spawn(watch_events(handle.clone()));
             tauri::async_runtime::spawn(autobuffer::run(handle.clone()));
+            notify::setup(&handle)?;
 
             if !start_hidden {
                 show_main(&handle);

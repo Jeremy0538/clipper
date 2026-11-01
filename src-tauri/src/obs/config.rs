@@ -24,7 +24,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { buffer_secs: 30, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000 }
+        Self { buffer_secs: 120, fps: 60, width: 1920, height: 1080, bitrate_kbps: 40_000 }
     }
 }
 
@@ -128,7 +128,7 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
             "[General]\nName={PROFILE}\n\n\
              [Output]\nMode=Advanced\nFilenameFormatting=Clip %CCYY-%MM-%DD %hh-%mm-%ss\nDelayEnable=false\n\n\
              [AdvOut]\nRecType=Standard\nRecFilePath={rec}\nRecFormat2=mp4\nRecEncoder=obs_nvenc_h264_tex\n\
-             RecTracks=15\nRecRB=true\nRecRBTime={secs}\nRecRBSize=4096\nRecRBPrefix=Replay\n\
+             RecTracks=15\nRecRB=true\nRecRBTime={secs}\nRecRBSize=8192\nRecRBPrefix=Replay\n\
              Track1Name=Mix\nTrack2Name=Game\nTrack3Name=Discord\nTrack4Name=Mic\n\n\
              [Video]\nBaseCX={w}\nBaseCY={h}\nOutputCX={w}\nOutputCY={h}\nFPSType=0\nFPSCommon={fps}\n\n\
              [Audio]\nSampleRate=48000\nChannelSetup=Stereo\n",

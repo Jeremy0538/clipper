@@ -1,10 +1,10 @@
 //! Starts the replay buffer while a game runs, stops it afterwards, and (on
 //! Windows) points OBS's game capture + game audio at the game's window.
 
-use crate::{games::Detector, set_status, AppState};
+use crate::{clog, games::Detector, notify, report_error, set_status, AppState};
 use serde_json::json;
 use std::{sync::atomic::Ordering, time::Duration};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 const TICK: Duration = Duration::from_secs(2);
 /// Consecutive empty scans before a game counts as closed (loading screens,
@@ -39,6 +39,8 @@ pub async fn run(app: AppHandle) {
                 misses = 0;
                 if current.as_ref().map(|c| c.pid) != Some(g.pid) {
                     st.user_stopped.store(false, Ordering::SeqCst);
+                    clog!("game detected: {} (pid {}, window \"{}\")", g.name, g.pid, g.obs_window);
+                    notify::info(&app, "Game detected", g.name.clone());
                     let name = g.name.clone();
                     set_status(&app, |s| s.game = Some(name)).await;
                     current = Some(g);
@@ -46,13 +48,14 @@ pub async fn run(app: AppHandle) {
             }
             None => {
                 misses += 1;
-                if misses >= GONE_AFTER && current.take().is_some() {
+                if misses >= GONE_AFTER && current.is_some() {
+                    clog!("game closed: {}", current.take().unwrap().name);
                     set_status(&app, |s| s.game = None).await;
                     targeted = None;
                     st.user_stopped.store(false, Ordering::SeqCst);
                     if auto_started && st.status.lock().await.buffer {
                         if let Err(e) = st.obs.client.call("StopReplayBuffer", json!({})).await {
-                            let _ = app.emit("error", format!("Could not stop the buffer: {e:#}"));
+                            report_error(&app, format!("Could not stop the buffer: {e:#}"));
                         }
                     }
                     auto_started = false;
@@ -79,8 +82,9 @@ pub async fn run(app: AppHandle) {
                         "overlay": true,
                     }))
                     .await;
-                    if let Err(e) = r {
-                        let _ = app.emit("error", format!("Could not target {}: {e:#}", game.name));
+                    match r {
+                        Ok(_) => clog!("{input} → {}", game.obs_window),
+                        Err(e) => report_error(&app, format!("Could not target {}: {e:#}", game.name)),
                     }
                 }
             }
@@ -89,10 +93,11 @@ pub async fn run(app: AppHandle) {
 
         if !buffer && !st.user_stopped.load(Ordering::SeqCst) {
             match st.obs.client.call("StartReplayBuffer", json!({})).await {
-                Ok(_) => auto_started = true,
-                Err(e) => {
-                    let _ = app.emit("error", format!("Could not start the buffer: {e:#}"));
+                Ok(_) => {
+                    auto_started = true;
+                    clog!("buffer auto-started for {}", game.name);
                 }
+                Err(e) => report_error(&app, format!("Could not start the buffer: {e:#}")),
             }
         }
     }

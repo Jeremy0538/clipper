@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Clipper toast</title>
+<style>
+  html, body { margin:0; background:transparent; overflow:hidden; font:13px system-ui, sans-serif; }
+  .card { box-sizing:border-box; margin:4px; height:68px; display:flex; align-items:center; gap:12px;
+          padding:0 14px; border-radius:12px; background:rgba(22,22,30,.92); color:#e6e6f0;
+          border-left:4px solid #a6e3a1; opacity:0; transform:translateX(24px); }
+  .card.bad { border-left-color:#f38ba8; }
+  .card.show { animation:in .18s ease-out forwards, out .3s ease-in 2.2s forwards; }
+  @keyframes in { to { opacity:1; transform:none; } }
+  @keyframes out { from { opacity:1; transform:none; } to { opacity:0; transform:translateX(24px); } }
+  .dot { width:10px; height:10px; border-radius:50%; background:#a6e3a1; flex:none; }
+  .bad .dot { background:#f38ba8; }
+  .t { font-weight:600; font-size:14px; }
+  .d { color:#9090a8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:250px; }
+</style>
+</head>
+<body>
+  <div class="card" id="card"><div class="dot"></div><div><div class="t" id="t"></div><div class="d" id="d"></div></div></div>
+<script>
+  const card = document.getElementById("card");
+  window.__TAURI__.event.listen("toast", ({ payload }) => {
+    document.getElementById("t").textContent = payload.title;
+    document.getElementById("d").textContent = payload.detail || "";
+    card.classList.toggle("bad", !payload.ok);
+    card.classList.remove("show");
+    void card.offsetWidth; // restart the animation
+    card.classList.add("show");
+  });
+</script>
+</body>
+</html>

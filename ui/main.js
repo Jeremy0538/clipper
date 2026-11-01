@@ -45,5 +45,53 @@ listen("status", (e) => { status = e.payload; render(); });
 listen("clip-saved", (e) => { say("Saved: " + e.payload); loadClips(); });
 listen("error", (e) => say(e.payload));
 
+// ---- settings ----
+const MODIFIERS = ["ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"];
+let listening = false;
+
+async function loadSettings() {
+  const s = await invoke("get_settings");
+  $("hotkey").textContent = s.hotkey_label;
+  const sel = $("buffer-len");
+  if (![...sel.options].some((o) => +o.value === s.buffer_secs)) {
+    sel.add(new Option(`${s.buffer_secs} s`, s.buffer_secs));
+  }
+  sel.value = String(s.buffer_secs);
+  $("opt-sound").checked = s.sound;
+  $("opt-toast").checked = s.toast;
+}
+
+$("hotkey").onclick = () => {
+  listening = true;
+  $("hotkey").classList.add("listening");
+  $("hotkey").textContent = "Press keys… (Esc cancels)";
+};
+window.addEventListener("keydown", async (e) => {
+  if (!listening) return;
+  e.preventDefault();
+  if (MODIFIERS.includes(e.code)) return; // wait for the real key
+  listening = false;
+  $("hotkey").classList.remove("listening");
+  if (e.code === "Escape") return loadSettings();
+  try {
+    $("hotkey").textContent = await invoke("set_hotkey", {
+      hotkey: { code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey },
+    });
+    say("Clip key saved.");
+  } catch (err) { say(err); loadSettings(); }
+});
+
+$("buffer-len").onchange = async (e) => {
+  try {
+    await invoke("set_buffer", { secs: +e.target.value });
+    say(status.buffer ? "Buffer length changed (the buffer restarted)." : "Buffer length saved.");
+  } catch (err) { say(err); }
+};
+for (const name of ["sound", "toast"]) {
+  $("opt-" + name).onchange = (e) => invoke("set_option", { name, value: e.target.checked }).catch(say);
+}
+$("logs").onclick = () => invoke("open_log_folder").catch(say);
+loadSettings();
+
 invoke("get_status").then((s) => { status = s; render(); });
 loadClips();

@@ -15,3 +15,7 @@ main { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); 
 .clip .meta { padding:8px 10px; }
 .clip .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .clip .sub { color:var(--dim); font-size:12px; }
+#settings { display:flex; flex-wrap:wrap; align-items:center; gap:16px; padding:10px 18px; border-bottom:1px solid #2a2a3a; color:var(--dim); }
+#settings label { display:flex; align-items:center; gap:6px; }
+#settings select { background:#2a2a3a; color:var(--fg); border:0; border-radius:6px; padding:6px 8px; }
+#hotkey.listening { background:var(--accent); color:#2a0d16; }

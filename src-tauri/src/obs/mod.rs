@@ -26,7 +26,8 @@ pub struct ObsManager {
     pub data_dir: PathBuf,
     /// OBS saves replays here; the app moves them into the clips folder.
     pub incoming: PathBuf,
-    pub settings: Settings,
+    /// Read again on every OBS (re)start; the buffer length can change at runtime.
+    pub settings: Mutex<Settings>,
     password: String,
     pid: Mutex<Option<u32>>,
     quitting: AtomicBool,
@@ -42,7 +43,7 @@ impl ObsManager {
             password: config::ws_password(&data_dir)?,
             data_dir,
             incoming,
-            settings,
+            settings: Mutex::new(settings),
             pid: Mutex::new(None),
             quitting: AtomicBool::new(false),
         }))
@@ -75,7 +76,8 @@ impl ObsManager {
                 download::install(&root, |p| report(format!("downloading OBS {p}%"))).await?;
             }
         }
-        config::write_all(&self.paths, &self.settings, &self.incoming, &self.password)?;
+        let settings = self.settings.lock().unwrap().clone();
+        config::write_all(&self.paths, &settings, &self.incoming, &self.password)?;
         #[cfg(not(windows))]
         setup::ensure_dev_media(&self.data_dir)?;
 
@@ -121,7 +123,7 @@ impl ObsManager {
 
         let specs = setup::specs(&self.data_dir);
         if let Err(e) =
-            setup::ensure_scene(&self.client, &specs, self.settings.width, self.settings.height).await
+            setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await
         {
             report(format!("error: scene setup: {e:#}"));
         } else {

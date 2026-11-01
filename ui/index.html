@@ -14,6 +14,21 @@
     <button id="toggle">Start buffer</button>
     <button id="save" class="primary">Save clip</button>
   </header>
+  <section id="settings">
+    <label>Clip key <button id="hotkey" title="Click, then press the new key combination">…</button></label>
+    <label>Buffer
+      <select id="buffer-len">
+        <option value="30">30 s</option><option value="60">1 min</option>
+        <option value="90">1.5 min</option><option value="120">2 min</option>
+        <option value="180">3 min</option><option value="240">4 min</option>
+        <option value="300">5 min</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="opt-sound"> Sound on save</label>
+    <label><input type="checkbox" id="opt-toast"> Debug pop-ups</label>
+    <span class="spacer"></span>
+    <button id="logs">Open log folder</button>
+  </section>
   <p id="msg"></p>
   <main id="clips"></main>
   <script src="main.js"></script>
