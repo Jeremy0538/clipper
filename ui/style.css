@@ -148,7 +148,6 @@ html.native-frame { border:0; }
 .clip .name { cursor:text; }
 .clip .rename { width:100%; font:inherit; font-weight:600; background:var(--ctl); color:var(--fg); border:1px solid var(--accent); border-radius:4px; padding:2px 4px; }
 .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
-#ed-size { background:var(--ctl); color:var(--fg); border:1px solid var(--ctl-border); border-radius:6px; padding:6px 8px; font:inherit; }
 .clip.selected { outline:3px solid var(--accent); outline-offset:-1px; }
 .thumb .order { position:absolute; left:8px; top:8px; min-width:26px; height:26px; border-radius:13px; display:grid; place-items:center;
   background:var(--accent); color:var(--on-accent); font-weight:700; font-size:13px; }
@@ -187,3 +186,45 @@ kbd { font:600 12px "Segoe UI", system-ui, sans-serif; border:1px solid var(--ct
 #report-text { width:100%; box-sizing:border-box; resize:vertical; margin:6px 0; }
 #report-token { flex:1; min-width:0; }
 #report-status { color:var(--dim); font-size:12.5px; }
+
+/* ---- clearer buttons + slightly larger base size (0.3.3) ---- */
+body { font-size:15px; }
+button { font-weight:600; padding:8px 16px; border-radius:8px; min-height:36px; transition:background-color .12s, border-color .12s, box-shadow .12s; }
+button:hover:not(:disabled) { filter:none; border-color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, var(--ctl)); }
+button:active:not(:disabled) { transform:translateY(1px); }
+button.primary { box-shadow:0 1px 3px rgba(0,0,0,.18); }
+button.primary:hover:not(:disabled) { background:color-mix(in srgb, var(--accent) 85%, var(--fg)); border-color:transparent; }
+button.small { padding:6px 12px; font-size:13px; font-weight:600; min-height:32px; }
+/* Header: Start clipping (accent outline), Record (red outline, solid while recording), Save (solid). */
+#toggle { border:2px solid var(--accent); color:var(--fg); }
+#record { border:2px solid var(--danger); color:var(--danger); background:var(--ctl); }
+#record:hover:not(:disabled) { background:color-mix(in srgb, var(--danger) 14%, var(--ctl)); border-color:var(--danger); }
+#record.rec { color:var(--bg); }
+#save { padding-left:20px; padding-right:20px; }
+/* Clip cards */
+.clip .actions { gap:8px; flex-wrap:wrap; }
+.clip .actions button { padding:6px 12px; font-size:13px; min-height:32px; }
+.clip .actions .danger { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 55%, var(--ctl-border)); }
+.clip .actions .danger:hover:not(:disabled) { background:color-mix(in srgb, var(--danger) 14%, var(--ctl)); border-color:var(--danger); }
+.clip .star, .clip .star:hover:not(:disabled) { background:transparent; border:0; min-height:0; box-shadow:none; }
+/* Things that look like links or tabs keep their own look. */
+.tab { min-height:34px; }
+.tab:hover:not(:disabled):not(.active) { background:var(--line); border-color:transparent; }
+.tab.active:hover { background:var(--accent); }
+button.link:hover:not(:disabled) { background:transparent; border-color:transparent; color:var(--fg); }
+.winctl button { min-height:0; font-weight:400; }
+.winctl button:hover:not(:disabled) { background:var(--line); border-color:transparent; }
+.winctl button.close:hover:not(:disabled) { background:#c42b1c; color:#fff; }
+.chips button { min-height:30px; }
+.chips button.active:hover { background:var(--accent); }
+.pill { font-size:13px; padding:4px 12px; }
+.clip .sub, .thumb .dur, .hint { font-size:13px; }
+.row { min-height:42px; }
+.row select, #report-text, #report-token, #game-filter { padding:8px 10px; border-radius:8px; }
+.share-menu { position:fixed; z-index:12; min-width:240px; background:var(--card); border:1px solid var(--ctl-border); border-radius:10px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,.28); display:flex; flex-direction:column; gap:2px; }
+.share-head { font-size:12px; color:var(--dim); padding:4px 10px 6px; text-transform:uppercase; letter-spacing:.04em; }
+.share-menu button { display:flex; flex-direction:column; align-items:flex-start; gap:1px; text-align:left; border:1px solid transparent; background:transparent; padding:8px 10px; min-height:0; }
+.share-menu button small { font-weight:400; color:var(--dim); font-size:12.5px; }
+.share-menu button:hover:not(:disabled) { background:color-mix(in srgb, var(--accent) 14%, var(--card)); border-color:transparent; }
+.tab { transition:none; }
+.clip .actions { flex-wrap:nowrap; }

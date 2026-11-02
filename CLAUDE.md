@@ -102,12 +102,17 @@ stream tag `name`.
   hooks: `CLIPPER_DEV_JS_FILE=<file>` runs JS in the page after 6 s (use `invoke()` and
   `uiLog()`, whose output goes to clipper.log), `CLIPPER_DEV_VIEW=settings`, `CLIPPER_DEV_EDIT=1`.
   `node scripts/obsctl.mjs <data dir> <Request> [json]` drives the private OBS.
+- The page is zoomed with the window (`fit_zoom` in lib.rs, 1100×720 = 1.0, max 1.6), so the CSS is
+  written for the default window size.
 - UI screenshots on Linux: WebKitGTK windows can't be grabbed, so render a copy of `ui/` in headless
   Chromium with a mocked `window.__TAURI__` (`--virtual-time-budget=3000`).
 
 ## Product decisions (don't undo without asking)
 
-- No sharing/upload feature: clips go to Discord by Copy → paste.
+- No upload feature: "Share" on a clip copies it to the clipboard to paste in Discord, optionally
+  made to fit Discord's limit first (free 20 MB, Nitro Basic 50 MB, Nitro 1 GB; checked 2026-11-02).
+  Fitted copies go to `<data>/share`, not the library. The editor no longer has a size option.
+- Clipping a real game always wins over an added app (Discord etc.): added apps only when no game runs.
 - OBS stays invisible. The user should only ever see Clipper.
 - The chime on save is permanent. Corner pop-ups are a debug option.
 - Default volumes are 100%. Discord and the extra apps are always in the Mix.

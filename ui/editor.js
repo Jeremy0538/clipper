@@ -212,7 +212,6 @@ $("ed-export").onclick = async () => {
     const out = await invoke("editor_export", { request: {
       path: ed.info.path, start: ed.start, end: ed.end,
       volumes: ed.tracks.map((t) => t.gain.gain.value),
-      target_mb: $("ed-size").value ? +$("ed-size").value : null,
     } });
     await closeEditor();
     say("Saved: " + out);

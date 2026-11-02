@@ -258,7 +258,9 @@ fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
             Some(w) => (w.area, Game { name, pid, obs_window: w.obs_string(), custom }),
             None => (-1, Game { name, pid, obs_window: String::new(), custom }),
         })
-        .max_by_key(|(area, _)| *area)
+        // A real game always wins over an added app (Discord, Chrome…): those
+        // are only clipped while no game runs. Then the biggest window.
+        .max_by_key(|(area, g)| (!g.custom, *area))
         .map(|(_, g)| g)
 }
 
@@ -266,7 +268,7 @@ fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
 fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
     candidates
         .into_iter()
-        .next()
+        .min_by_key(|c| c.2) // a real game before an added app
         .map(|(name, pid, custom)| Game { name, pid, obs_window: String::new(), custom })
 }
 

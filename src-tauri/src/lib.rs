@@ -93,6 +93,24 @@ fn update_tray(app: &AppHandle, s: &Status) {
     }
 }
 
+/// Scale the whole page with the window: the layout is made for 1100×720, so a
+/// maximised window (e.g. 1920×1080) gets proportionally bigger text and
+/// buttons instead of the same small ones with lots of empty space.
+fn fit_zoom(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) else { return };
+    let (lw, lh) = (size.width as f64 / scale, size.height as f64 / scale);
+    if lw < 200.0 || lh < 200.0 {
+        return; // minimised
+    }
+    let z = ((lw / 1100.0).min(lh / 720.0).clamp(1.0, 1.6) * 20.0).round() / 20.0;
+    static LAST: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+    let mut last = LAST.lock().unwrap();
+    if (*last - z).abs() > 0.001 && w.set_zoom(z).is_ok() {
+        *last = z;
+    }
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -649,12 +667,56 @@ fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), St
     Ok(())
 }
 
+/// Share = put a file on the clipboard to paste in Discord. With a size limit
+/// (MB) the clip is made to fit first, unless it already does. Fitted copies go
+/// to `<data>/share` (not the library) and are cleaned up after a day.
+/// Returns what was copied: "original" or "fitted".
 #[tauri::command]
-async fn copy_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    let p = clips::checked(&state.clips_dir, &path)?;
-    tauri::async_runtime::spawn_blocking(move || clips::copy_file(&p))
+async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let p = clips::checked(&st.clips_dir, &path)?;
+    let size_mb = std::fs::metadata(&p).map(|m| m.len() as f64 / 1e6).unwrap_or(f64::MAX);
+    let is_image = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("jpg"));
+    let (file, kind) = match max_mb {
+        Some(mb) if size_mb > mb * 0.97 && !is_image => {
+            let tools = tools_for(&app).await?;
+            clog!("share: fitting {} ({size_mb:.1} MB) into {mb} MB", p.display());
+            let data = st.obs.data_dir.clone();
+            let info = editor::open(&tools, &data.join("share-cache"), &p)
+                .await
+                .map_err(|e| format!("Could not read the clip: {e:#}"))?;
+            let out_dir = data.join("share");
+            std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+            let req = editor::ExportRequest {
+                path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(mb),
+            };
+            let h = app.clone();
+            let out = editor::export(&tools, &out_dir, &info, &req, move |pc| { let _ = h.emit("share-progress", pc); })
+                .await
+                .map_err(|e| { clog!("ERROR share export: {e:#}"); format!("Could not make it smaller: {e:#}") })?;
+            let _ = std::fs::remove_dir_all(data.join("share-cache"));
+            clog!("share: fitted to {:.1} MB", std::fs::metadata(&out).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
+            (out, "fitted")
+        }
+        _ => (p, "original"),
+    };
+    tauri::async_runtime::spawn_blocking(move || clips::copy_file(&file))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    Ok(kind.into())
+}
+
+/// Fitted share copies older than a day (the clipboard has long moved on).
+fn clean_share_dir(data_dir: &std::path::Path) {
+    let Ok(dir) = std::fs::read_dir(data_dir.join("share")) else { return };
+    for e in dir.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(24 * 3600));
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[tauri::command]
@@ -906,11 +968,11 @@ pub fn run() {
             list_audio_devices, list_games, set_game_enabled, list_running_apps, add_custom_game, toggle_recording, list_monitors,
             set_screen_monitor, set_quality,
             remove_custom_game, set_meters,
-            delete_clip, copy_clip, reveal_clip, open_clips_folder,
+            delete_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
-            set_report_token, report_problem
+            set_report_token, report_problem, share_clip
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -928,6 +990,7 @@ pub fn run() {
             clips::sort_into_folders(&clips_dir);
             updater::cleanup();
             let _ = std::fs::remove_dir_all(data_dir.join("editor-cache"));
+            clean_share_dir(&data_dir);
             clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
 
             let settings_file = data_dir.join("settings.json");
@@ -1073,6 +1136,7 @@ pub fn run() {
                 let _ = w.eval(&format!(
                     "setTimeout(async () => {{ await openEditor((await invoke('list_clips'))[0]); {then} }}, 1500)"));
             }
+            fit_zoom(&handle);
             #[cfg(debug_assertions)]
             if let (Ok(view), Some(w)) = (std::env::var("CLIPPER_DEV_VIEW"), handle.get_webview_window("main")) {
                 let js = format!("setTimeout(() => document.querySelector('[data-view={view}]')?.click(), 800)");
@@ -1081,6 +1145,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, ev| {
+            if let WindowEvent::Resized(_) = ev {
+                if window.label() == "main" {
+                    fit_zoom(window.app_handle());
+                }
+            }
             // Closing the window keeps Clipper running in the tray.
             if let WindowEvent::CloseRequested { api, .. } = ev {
                 api.prevent_close();

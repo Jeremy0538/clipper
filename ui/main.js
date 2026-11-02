@@ -118,8 +118,8 @@ function clipCard(c) {
   el.innerHTML = `<div class="thumb">${isImg ? "<img alt=''>" : "<video muted preload='metadata'></video><span class='dur'></span>"}</div>
     <div class="meta"><div><div class="name" title="Double-click to rename"></div><div class="sub"></div></div>
       <button class="star" title="Star: never deleted by the storage limit">★</button></div>
-    <div class="actions"><button data-a="copy" title="Copy the file, then paste it in Discord">Copy</button>
-      ${isImg ? "" : "<button data-a='edit'>Edit</button>"}<button data-a="reveal">Show in folder</button><span class="spacer"></span>
+    <div class="actions"><button data-a="share" class="primary" title="Copy it to paste in Discord (Ctrl+V)">Share ▾</button>
+      ${isImg ? "" : "<button data-a='edit'>Edit</button>"}<button data-a="reveal" title="Show in folder">Folder</button><span class="spacer"></span>
       <button data-a="delete" class="danger">Delete</button></div>`;
   if (isImg) {
     el.querySelector("img").src = convertFileSrc(c.path);
@@ -166,8 +166,7 @@ function clipCard(c) {
     }
     isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openPlayer(c);
   };
-  el.querySelector('[data-a="copy"]').onclick = () =>
-    invoke("copy_clip", { path: c.path }).then(() => say("Copied: paste it in Discord with Ctrl+V."), say);
+  el.querySelector('[data-a="share"]').onclick = (e) => { e.stopPropagation(); openShare(e.currentTarget, c, isImg); };
   el.querySelector('[data-a="edit"]')?.addEventListener("click", () => openEditor(c));
   el.querySelector('[data-a="reveal"]').onclick = () => invoke("reveal_clip", { path: c.path }).catch(say);
   const del = el.querySelector('[data-a="delete"]');
@@ -185,6 +184,73 @@ function clipCard(c) {
     } catch (err) { say(err); }
   };
   return el;
+}
+
+// ---------- share ----------
+// Share = copy to the clipboard, ready to paste in Discord (no upload). Video
+// clips can first be made to fit Discord's upload limit for your account.
+const SHARE = [
+  { mb: 20, label: "Discord", sub: "free account · 20 MB" },
+  { mb: 50, label: "Discord Nitro Basic", sub: "50 MB" },
+  { mb: 1000, label: "Discord Nitro", sub: "1 GB" },
+  { mb: null, label: "Original file", sub: "full quality" },
+];
+let shareBusy = false;
+function closeShare() { document.querySelector(".share-menu")?.remove(); }
+document.addEventListener("click", (e) => { if (!e.target.closest(".share-menu")) closeShare(); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeShare(); });
+
+function openShare(btn, c, isImg) {
+  const open = document.querySelector(".share-menu");
+  closeShare();
+  if (open?.dataset.path === c.path) return;   // second click closes it
+  if (isImg) return shareClip(btn, c, null);
+  let last = null;
+  try { last = localStorage.getItem("share-mb"); } catch {}
+  const menu = document.createElement("div");
+  menu.className = "share-menu";
+  menu.dataset.path = c.path;
+  const head = document.createElement("div");
+  head.className = "share-head";
+  head.textContent = "Copy for…";
+  menu.append(head, ...SHARE.map((o) => {
+    const b = document.createElement("button");
+    const fits = o.mb === null || c.size <= o.mb * 1e6 * 0.97;
+    b.innerHTML = `<b></b><small></small>`;
+    b.querySelector("b").textContent = o.label + (String(o.mb) === last ? "  ✓" : "");
+    b.querySelector("small").textContent = o.sub + (o.mb && !fits ? " · made smaller" : "");
+    b.onclick = (e) => { e.stopPropagation(); closeShare(); shareClip(btn, c, o.mb); };
+    return b;
+  }));
+  document.body.append(menu);
+  const r = btn.getBoundingClientRect(), m = menu.getBoundingClientRect();
+  const top = r.bottom + 4 + m.height > innerHeight ? r.top - 4 - m.height : r.bottom + 4;
+  menu.style.top = Math.max(4, top) + "px";
+  menu.style.left = Math.max(4, Math.min(r.left, innerWidth - m.width - 4)) + "px";
+}
+
+async function shareClip(btn, c, mb) {
+  if (shareBusy) return say("Still preparing the previous clip…");
+  shareBusy = true;
+  try { localStorage.setItem("share-mb", String(mb)); } catch {}
+  const text = btn.textContent;
+  btn.disabled = true;
+  const needsFit = mb !== null && c.size > mb * 1e6 * 0.97;
+  btn.textContent = needsFit ? "Preparing…" : "Copying…";
+  if (needsFit) say("Making it fit for Discord… you can keep using Clipper.");
+  const un = await listen("share-progress", (e) => { btn.textContent = `Preparing ${e.payload}%`; });
+  try {
+    await invoke("share_clip", { path: c.path, maxMb: mb });
+    say("Copied! Paste it in Discord with Ctrl+V.");
+    btn.textContent = "Copied ✓";
+    setTimeout(() => { btn.textContent = text; }, 2500);
+  } catch (err) {
+    say(err);
+    btn.textContent = text;
+  }
+  un();
+  btn.disabled = false;
+  shareBusy = false;
 }
 
 let folderFilter = "";

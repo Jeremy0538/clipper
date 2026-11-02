@@ -196,9 +196,12 @@ pub async fn export(
     let trimmed = start > 0.05 || end < info.duration - 0.05;
     let length = (end - start).max(0.1);
     // Fit-to-size: total bits / seconds, minus the audio, with 7 % headroom for the container.
-    let fit_kbps = req.target_mb.map(|mb| ((mb * 8000.0 * 0.93 / length) - 128.0).max(250.0) as u32);
+    // Capped at the "High" recording bitrate: a big limit (Nitro, 1 GB) must not
+    // make the file larger than the original.
+    let fit_kbps = req.target_mb.map(|mb| ((mb * 8000.0 * 0.93 / length) - 128.0).clamp(250.0, 40_000.0) as u32);
     let reencode = trimmed || fit_kbps.is_some();
-    let max_h: Option<u32> = fit_kbps.map(|k| if k < 2500 { 720 } else if k < 6000 { 1080 } else { 1440 })
+    let max_h: Option<u32> = fit_kbps
+        .and_then(|k| if k < 2500 { Some(720) } else if k < 6000 { Some(1080) } else if k < 12_000 { Some(1440) } else { None })
         .filter(|&h| h < info.height);
 
     // Which sources carry sound in the range?
