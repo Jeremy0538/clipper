@@ -118,8 +118,8 @@
           <label class="choice"><input type="radio" name="su-gm" value="off"><b>No game sound</b></label>
         </div>
         <div class="row hidden" id="su-row-desktop"><span>Output device</span><select id="su-desktop-device"></select></div>
-        <div class="row"><span>Record Discord</span><input type="checkbox" id="su-discord"></div>
-        <p class="hint">Discord goes on its own track, so you can turn your friends down or off in the editor later.</p>
+        <div class="row"><span>Record Discord audio</span><input type="checkbox" id="su-discord"></div>
+        <p class="hint">Only the sound of your call (your friends), on its own track so you can turn it down or off in the editor later. The Discord window itself is never recorded.</p>
       </section>
 
       <section class="step" data-title="Microphone">
@@ -250,11 +250,11 @@
       <div class="row"><span>Volume</span><input type="range" id="a-game-volume" min="0" max="300" step="5"><output></output></div>
       <div class="row"><span>Level</span><div class="meter" data-inputs="Game Audio,Game Capture"><i></i></div></div>
 
-      <h3>Discord</h3>
-      <div class="row"><span>Record Discord</span><input type="checkbox" id="a-discord-enabled"></div>
+      <h3>Discord audio</h3>
+      <div class="row"><span>Record Discord audio</span><input type="checkbox" id="a-discord-enabled"></div>
       <div class="row"><span>Volume</span><input type="range" id="a-discord-volume" min="0" max="300" step="5"><output></output></div>
       <div class="row"><span>Level</span><div class="meter" data-inputs="Discord"><i></i></div></div>
-      <p class="hint">Discord is found through its window: if Discord is closed to the system tray, it can't be recorded.</p>
+      <p class="hint">Only Discord's sound goes into your clips, not its window. Discord is found through its window: if it is closed to the system tray, its sound can't be recorded. Want to clip the Discord window itself? Add it under Games with "Add running app…".</p>
 
       <h3>Microphone</h3>
       <div class="row"><span>Record microphone</span><input type="checkbox" id="a-mic-enabled"></div>
