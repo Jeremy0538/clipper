@@ -113,6 +113,19 @@ $("sel-all").onclick = () => {
   }
   syncSelection();
 };
+// Windows can't move a file to the recycle bin while a <video> still has it
+// open: let go of it everywhere (player, editor, thumbnails) first.
+function releaseMedia(path) {
+  const url = convertFileSrc(path);
+  for (const v of document.querySelectorAll("video")) {
+    const src = v.getAttribute("src") || "";
+    if (src && src.split("#")[0] === url) {
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+    }
+  }
+}
 let delTimer;
 $("sel-delete").onclick = async () => {
   const d = $("sel-delete");
@@ -128,6 +141,7 @@ $("sel-delete").onclick = async () => {
   let ok = 0;
   const failed = [];
   for (const path of [...selected]) {
+    releaseMedia(path);
     try { await invoke("delete_clip", { path }); ok++; }
     catch (err) { failed.push(err); }
   }
@@ -215,6 +229,7 @@ function clipCard(c) {
       setTimeout(() => { del.classList.remove("armed"); del.textContent = "Delete"; }, 3000);
       return;
     }
+    releaseMedia(c.path);
     try {
       await invoke("delete_clip", { path: c.path });
       say("Moved to the recycle bin.");

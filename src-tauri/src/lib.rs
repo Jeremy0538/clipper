@@ -207,13 +207,19 @@ pub(crate) async fn take_screenshot(app: &AppHandle) -> Result<(), String> {
     let dir = st.clips_dir().join(clips::sanitize(&folder));
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{} {}.png", clips::sanitize(&folder), chrono::Local::now().format("%Y-%m-%d %H-%M-%S")));
-    let r = async {
+    let save = || async {
         let scene = st.obs.client.call("GetCurrentProgramScene", json!({})).await?;
         st.obs.client.call("SaveSourceScreenshot", json!({
             "sourceName": scene["currentProgramSceneName"], "imageFormat": "png",
             "imageFilePath": file.to_string_lossy(),
         })).await
-    }.await;
+    };
+    let mut r = save().await;
+    if r.is_err() && !dir.is_dir() {
+        // The game folder was removed as empty (last clip deleted) in the meantime.
+        let _ = std::fs::create_dir_all(&dir);
+        r = save().await;
+    }
     if entered {
         let _ = modes::leave_screen(app).await;
     }
@@ -753,9 +759,16 @@ fn open_log_folder() -> Result<(), String> {
 
 #[tauri::command]
 fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    let p = clips::checked_in(&state.clip_dirs(), &path)?;
-    clips::trash(&p)?;
+    let dirs = state.clip_dirs();
+    let p = clips::checked_in(&dirs, &path)?;
+    if let Err(e) = clips::trash(&p) {
+        clog!("ERROR could not move {} to the recycle bin: {e}", p.display());
+        return Err(format!("Could not move it to the recycle bin: {e}"));
+    }
     clog!("clip moved to the recycle bin: {}", p.display());
+    // Only folders that are Clipper's own: never remove a user's own (empty) folder.
+    let ours: Vec<PathBuf> = dirs.into_iter().filter(|d| clips::is_ours(d)).collect();
+    clips::remove_empty_folder(&p, &clips::root_keys(&ours));
     Ok(())
 }
 

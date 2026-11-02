@@ -39,6 +39,7 @@ pub fn sanitize(s: &str) -> String {
 pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf> {
     let name = sanitize(game.unwrap_or("Clip"));
     let clips_dir = &clips_dir.join(&name);
+    let _lock = FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
     fs::create_dir_all(clips_dir)?;
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
     let base = format!("{name} {stamp}");
@@ -194,7 +195,8 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
                     one(&f.path(), &to.join(&name));
                 }
             }
-            let _ = fs::remove_dir(&p); // only when empty
+            let _lock = FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+            remove_if_empty(&p);
         } else if p.is_file() && name != "desktop.ini" && name != MARKER {
             one(&p, to);
         }
@@ -313,6 +315,68 @@ pub fn list_all(dirs: &[PathBuf]) -> Vec<ClipInfo> {
 
 pub fn trash(p: &Path) -> Result<(), String> {
     trash::delete(p).map_err(|e| e.to_string())
+}
+
+/// Held while a game folder is created and filled, and while an empty one is
+/// removed: a new clip never lands in a folder that is being deleted.
+static FOLDERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Comparable spelling of a folder: real location, plain form, case-insensitive on Windows.
+fn dir_key(d: &Path) -> Option<String> {
+    let k = plain(&fs::canonicalize(d).ok()?.to_string_lossy());
+    Some(if cfg!(windows) { k.to_lowercase() } else { k })
+}
+
+/// The clips folders as `dir_key`s, worked out once for many removals.
+pub fn root_keys(dirs: &[PathBuf]) -> Vec<String> {
+    dirs.iter().filter_map(|d| dir_key(d)).collect()
+}
+
+/// Remove `dir` when nothing is left in it (a lone desktop.ini counts as nothing).
+fn remove_if_empty(dir: &Path) -> bool {
+    let left: Vec<_> = match fs::read_dir(dir) {
+        Ok(r) => r.flatten().map(|e| e.file_name()).collect(),
+        Err(e) => {
+            crate::clog!("could not look into {}: {e}", dir.display());
+            return false;
+        }
+    };
+    if left.len() == 1 && left[0] == "desktop.ini" {
+        // Explorer marks a folder with a desktop.ini read-only, which can block removing it.
+        if let Ok(m) = fs::metadata(dir) {
+            let mut perm = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            let _ = fs::set_permissions(dir, perm);
+        }
+        let _ = fs::remove_file(dir.join("desktop.ini"));
+    } else if !left.is_empty() {
+        return false;
+    }
+    match fs::remove_dir(dir) {
+        Ok(()) => {
+            crate::clog!("removed empty folder: {}", dir.display());
+            true
+        }
+        Err(e) => {
+            crate::clog!("could not remove empty folder {}: {e}", dir.display());
+            false
+        }
+    }
+}
+
+/// After a clip is gone: remove its game folder when that is now empty, so
+/// Explorer doesn't keep showing empty "Chrome"/"Obsidian" folders. Only a
+/// folder directly inside one of `roots` (Clipper's own clips folders, see
+/// `root_keys`), never a root itself.
+pub fn remove_empty_folder(clip: &Path, roots: &[String]) {
+    let Some(parent) = clip.parent() else { return };
+    let _lock = FOLDERS.lock().unwrap_or_else(|e| e.into_inner());
+    let (Some(folder), Some(up)) = (dir_key(parent), parent.parent().and_then(dir_key)) else { return };
+    if roots.contains(&folder) || !roots.contains(&up) {
+        return;
+    }
+    remove_if_empty(parent);
 }
 
 /// Put the file itself on the clipboard (paste into Discord / Explorer).
@@ -443,6 +507,7 @@ pub fn enforce_limit(dirs: &[PathBuf], limit_gb: f64, favorites: &[String]) -> u
     let mut all = list_all(&ours);
     let mut total: u64 = all.iter().map(|c| c.size).sum();
     all.sort_by_key(|c| c.modified); // oldest first
+    let roots = root_keys(&ours);
     let mut n = 0;
     for c in all {
         if total <= limit {
@@ -452,6 +517,7 @@ pub fn enforce_limit(dirs: &[PathBuf], limit_gb: f64, favorites: &[String]) -> u
             continue;
         }
         if fs::remove_file(&c.path).is_ok() {
+            remove_empty_folder(Path::new(&c.path), &roots);
             total = total.saturating_sub(c.size);
             n += 1;
             crate::clog!("storage limit: deleted {}", c.path);
@@ -528,5 +594,35 @@ mod move_tests {
         assert_eq!(super::target_for(&base), base.join("Clipper"), "a folder with other things in it");
         assert_eq!(super::target_for(&base.join("new")), base.join("new"));
         std::fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod empty_folder_tests {
+    use super::*;
+
+    #[test]
+    fn removes_only_empty_game_folders() {
+        let root = std::env::temp_dir().join(format!("clipper-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (game, busy) = (root.join("Chrome"), root.join("Rocket League"));
+        fs::create_dir_all(&game).unwrap();
+        fs::create_dir_all(&busy).unwrap();
+        fs::write(game.join("desktop.ini"), "").unwrap();
+        fs::write(busy.join("other.mp4"), "x").unwrap();
+        let roots = root_keys(&[root.clone()]);
+
+        remove_empty_folder(&game.join("Chrome 1.mp4"), &roots); // only desktop.ini left
+        assert!(!game.exists());
+        remove_empty_folder(&busy.join("gone.mp4"), &roots); // still has a clip
+        assert!(busy.exists());
+        remove_empty_folder(&root.join("loose.mp4"), &roots); // the clips folder itself stays
+        assert!(root.exists());
+        // A folder that isn't one of the roots is never touched.
+        let other = root.join("Rocket League").join("Sub");
+        fs::create_dir_all(&other).unwrap();
+        remove_empty_folder(&other.join("x.mp4"), &roots);
+        assert!(other.exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }

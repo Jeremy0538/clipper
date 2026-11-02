@@ -191,10 +191,28 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// The "new issue" URL (description and status, redacted, short enough for
-/// every browser) and the end of clipper.log (redacted) to paste into it.
+/// The last error lines of a log (newest last), each kept short: they go in
+/// the issue itself, because the full log on the clipboard is often not pasted.
+fn error_lines(log: &str, max_lines: usize) -> String {
+    let errs: Vec<String> = log
+        .lines()
+        .filter(|l| l.contains("ERROR"))
+        .map(|l| if l.chars().count() > 240 { format!("{}…", l.chars().take(240).collect::<String>()) } else { l.to_string() })
+        .collect();
+    errs[errs.len().saturating_sub(max_lines)..].join("\n")
+}
+
+/// The "new issue" URL (description, recent errors and status, redacted,
+/// short enough for every browser) and the end of clipper.log (redacted) to
+/// paste into it.
 pub fn github_issue(text: &str, summary: &str) -> (String, String) {
+    let log = crate::log::path().and_then(|p| tail(p, LOG_MAX)).map(|t| redact(&t));
+    github_issue_with(text, summary, log)
+}
+
+fn github_issue_with(text: &str, summary: &str, log: Option<String>) -> (String, String) {
     let text = redact(text.trim());
+    let errors = log.as_deref().map(|l| error_lines(l, 8)).unwrap_or_default();
     let first = text.lines().next().unwrap_or("").chars().take(80).collect::<String>();
     let title = url_encode(&format!("{}: {}", env!("CARGO_PKG_VERSION"), if first.is_empty() { "problem report" } else { &first }));
     let summary = redact(summary);
@@ -202,19 +220,34 @@ pub fn github_issue(text: &str, summary: &str) -> (String, String) {
     // Never more than fits anyway (each char is at least 3 URL bytes when
     // encoded, often more), then shorten in big steps.
     let (mut text_len, mut summary_len) = (text.chars().count().min(URL_MAX / 2), summary.chars().count().min(URL_MAX / 2));
+    // Errors are cut from the oldest end: the newest one matters most.
+    let mut errors_len = errors.chars().count().min(URL_MAX / 2);
     let url = loop {
         let cut = |s: &str, n: usize| -> String {
             if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
         };
-        let body = format!("**What happened**\n{}\n\n**Details**\n```\n{}\n```\n\n{paste}", cut(&text, text_len), cut(&summary, summary_len));
+        let errs = if errors_len == 0 {
+            String::new()
+        } else {
+            let n = errors.chars().count();
+            let kept: String = errors.chars().skip(n - errors_len.min(n)).collect();
+            format!("**Recent errors**\n```\n{}{kept}\n```\n\n", if errors_len < n { "…" } else { "" })
+        };
+        let body = format!("**What happened**\n{}\n\n{errs}**Details**\n```\n{}\n```\n\n{paste}", cut(&text, text_len), cut(&summary, summary_len));
         let url = format!("{ISSUES}?title={title}&body={}", url_encode(&body));
-        if url.len() <= URL_MAX || (text_len == 0 && summary_len == 0) {
+        if url.len() <= URL_MAX || (text_len == 0 && summary_len == 0 && errors_len == 0) {
             break url;
         }
-        // Shorten the status first, then the description.
-        if summary_len > 0 { summary_len = (summary_len * 4 / 5).saturating_sub(20) } else { text_len = (text_len * 4 / 5).saturating_sub(10) }
+        // Shorten the status first, then the errors, then the description.
+        if summary_len > 0 {
+            summary_len = (summary_len * 4 / 5).saturating_sub(20)
+        } else if errors_len > 0 {
+            errors_len = (errors_len * 4 / 5).saturating_sub(20)
+        } else {
+            text_len = (text_len * 4 / 5).saturating_sub(10)
+        }
     };
-    let log = crate::log::path().and_then(|p| tail(p, LOG_MAX)).map(|t| redact(&t)).unwrap_or_else(|| "(clipper.log could not be read)".into());
+    let log = log.unwrap_or_else(|| "(clipper.log could not be read)".into());
     let clip = format!("```\n{}\n```\n(names, paths and window titles removed)\n", log.trim_end());
     (url, clip)
 }
@@ -278,6 +311,20 @@ mod tests {
         }
         let (u, _) = super::github_issue("short", "Version 1");
         assert!(u.contains("short") && u.contains("Version%201"));
+    }
+
+    #[test]
+    fn issue_has_recent_errors() {
+        let log = "a ok\nb ERROR old one\nc fine\nd ERROR could not move x to the recycle bin\n".to_string();
+        let (u, _) = super::github_issue_with("it won't delete", "Version 1", Some(log));
+        assert!(u.contains(&super::url_encode("Recent errors")));
+        assert!(u.contains(&super::url_encode("could not move x to the recycle bin")));
+        assert!(!u.contains(&super::url_encode("a ok")));
+        // A huge error list still fits, keeping the newest error.
+        let many = (0..200).map(|i| format!("{i} ERROR {}", "y".repeat(200))).collect::<Vec<_>>().join("\n") + "\nZ ERROR newest";
+        let (u, _) = super::github_issue_with("x", &"s".repeat(3000), Some(many));
+        assert!(u.len() <= super::URL_MAX, "{}", u.len());
+        assert!(u.contains(&super::url_encode("newest")), "newest error dropped");
     }
 
     use super::*;

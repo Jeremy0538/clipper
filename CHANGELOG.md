@@ -4,6 +4,11 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.7
+- Deleting the last clip of a game also removes its now-empty folder.
+- Deleting works while the clip is open in the player or editor.
+- "Report a problem" now includes recent errors in the report itself.
+
 ## 0.4.5
 - Clips in an earlier clips folder (not moved, or saved while your drive was unplugged) keep showing in Clipper.
 - More reliable: one key press never triggers an action twice, and a damaged OBS file no longer stops recording.
