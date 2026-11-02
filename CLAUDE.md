@@ -118,7 +118,7 @@ stream tag `name`.
   Fitted copies go to `<data>/share`, not the library. The editor no longer has a size option.
 - Clipping a real game always wins over an added app (Discord etc.): added apps only when no game runs.
 - OBS stays invisible. The user should only ever see Clipper.
-- The chime on save is permanent. Corner pop-ups are a debug option.
+- The chime on save is permanent. Corner pop-ups are a normal user option ("Pop-up notifications", 2026-11-02), no longer a debug aid.
 - Default volumes are 100%. Discord and the extra apps are always in the Mix.
 - Clipping starts automatically only for Steam games, Minecraft and apps the user added.
 - Not wanted for now: vertical export, automatic highlights.

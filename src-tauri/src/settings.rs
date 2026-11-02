@@ -20,7 +20,7 @@ pub struct UserSettings {
     pub buffer_secs: u32,
     /// Chime when a clip is saved.
     pub sound: bool,
-    /// Small corner pop-ups (clip saved, game detected, errors) — debug aid.
+    /// Small corner pop-ups (clip saved, clipping on, game detected, errors).
     pub toast: bool,
     pub audio: AudioSettings,
     /// Games the user switched off: no buffer while they run.
