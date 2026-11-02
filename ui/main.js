@@ -152,7 +152,8 @@ function clipCard(c) {
   star.onclick = () => {
     c.favorite = !c.favorite;
     star.classList.toggle("on", c.favorite);
-    invoke("set_favorite", { path: c.path, on: c.favorite }).catch(say);
+    invoke("set_favorite", { path: c.path, on: c.favorite })
+      .then(() => { say(c.favorite ? "Starred: the storage limit never deletes it." : "Star removed."); loadClips(); }, say);
   };
   el.querySelector(".sub").textContent =
     `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
@@ -254,19 +255,23 @@ async function shareClip(btn, c, mb) {
 }
 
 let folderFilter = "";
+const STARRED = "\u0000starred";   // filter value for "only starred clips"
 async function loadClips() {
   const all = await invoke("list_clips");
   const folders = [...new Set(all.map((c) => c.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  if (folderFilter && !folders.includes(folderFilter)) folderFilter = "";
-  $("folders").replaceChildren(...["", ...folders].map((f) => {
+  const anyStar = all.some((c) => c.favorite);
+  if (folderFilter === STARRED ? !anyStar : folderFilter && !folders.includes(folderFilter)) folderFilter = "";
+  const chips = ["", ...(anyStar ? [STARRED] : []), ...folders];
+  $("folders").replaceChildren(...chips.map((f) => {
     const b = document.createElement("button");
-    b.textContent = f || "All";
+    b.textContent = f === STARRED ? "★ Starred" : f || "All";
     b.classList.toggle("active", f === folderFilter);
     b.onclick = () => { folderFilter = f; loadClips(); };
     return b;
   }));
-  $("folders").classList.toggle("hidden", folders.length < 2);
-  const clips = folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
+  $("folders").classList.toggle("hidden", chips.length < 3 && !anyStar);
+  const clips = folderFilter === STARRED ? all.filter((c) => c.favorite)
+    : folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
   $("clips").replaceChildren(...clips.map(clipCard));
   selected = selected.filter((p) => all.some((c) => c.path === p));
   syncSelection();

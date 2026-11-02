@@ -118,6 +118,15 @@ pub fn sort_into_folders(clips_dir: &Path) {
     }
 }
 
+/// Windows `canonicalize` returns "\\\\?\\C:\\..." paths, while the clip list uses
+/// "C:\\...". Everything that stores or compares clip paths uses the plain form.
+fn plain(p: &str) -> String {
+    match p.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => p.to_string(),
+    }
+}
+
 /// A clip path from the UI, only if it really is a file inside the clips folder.
 pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
     let dir = fs::canonicalize(clips_dir).map_err(|e| e.to_string())?;
@@ -126,7 +135,7 @@ pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
     if !inside || !p.is_file() {
         return Err("Not a clip in the clips folder".into());
     }
-    Ok(p)
+    Ok(PathBuf::from(plain(&p.to_string_lossy())))
 }
 
 pub fn trash(p: &Path) -> Result<(), String> {
@@ -204,7 +213,9 @@ impl Favorites {
         Self(data_dir.join("favorites.json"))
     }
     pub fn load(&self) -> Vec<String> {
-        fs::read_to_string(&self.0).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let v: Vec<String> = fs::read_to_string(&self.0).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        // Stars saved by 0.2.3-0.3.4 have the "\\\\?\\" form and never matched.
+        v.iter().map(|p| plain(p)).collect()
     }
     fn save(&self, v: &[String]) {
         let _ = fs::write(&self.0, serde_json::to_string(v).unwrap_or_default());
@@ -251,4 +262,15 @@ pub fn enforce_limit(clips_dir: &Path, limit_gb: f64, favorites: &[String]) -> u
         }
     }
     n
+}
+
+#[cfg(test)]
+mod plain_tests {
+    #[test]
+    fn strips_verbatim_prefix() {
+        assert_eq!(super::plain(r"\\?\C:\Users\a\Videos\Clipper\x.mp4"), r"C:\Users\a\Videos\Clipper\x.mp4");
+        assert_eq!(super::plain(r"C:\x.mp4"), r"C:\x.mp4");
+        assert_eq!(super::plain(r"\\?\UNC\server\x.mp4"), r"\\?\UNC\server\x.mp4");
+        assert_eq!(super::plain("/home/a/x.mp4"), "/home/a/x.mp4");
+    }
 }
