@@ -62,6 +62,7 @@ function suFill() {
   $("su-storage").value = String(settings.storage_limit_gb);
   $("su-autostart").checked = settings.autostart;
   $("su-sound").checked = settings.sound;
+  $("su-toast").checked = settings.toast;
   const enc = $("su-encoder");
   enc.classList.toggle("warn", !settings.gpu_encoding);
   enc.textContent = settings.gpu_encoding
@@ -142,7 +143,7 @@ for (const r of document.querySelectorAll('input[name="su-q"]')) {
 }
 $("su-storage").onchange = (e) => suSave(invoke("set_storage_limit", { gb: +e.target.value }).then(() => { settings.storage_limit_gb = +e.target.value; }));
 $("su-screen").onchange = (e) => suSave(invoke("set_screen_monitor", { monitor: e.target.value }).then(() => { settings.screen_monitor = e.target.value; }));
-for (const name of ["autostart", "sound"]) {
+for (const name of ["autostart", "sound", "toast"]) {
   $("su-" + name).onchange = (e) => suSave(invoke("set_option", { name, value: e.target.checked }).then(() => { settings[name] = e.target.checked; }));
 }
 
