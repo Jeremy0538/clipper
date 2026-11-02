@@ -25,11 +25,17 @@ fn parse(text: &str) -> Vec<(semver::Version, Entry)> {
     out
 }
 
-/// Entries newer than `seen` up to and including `current`, newest first.
+/// Entries newer than `seen` up to and including `current`, newest first
+/// (an unparsable `seen`: only `current`).
+/// `seen` is "" when the previous version didn't store it (up to 0.4.2). For
+/// stable users that was 0.4.1, the last stable release before this feature.
 pub fn since(seen: &str, current: &str) -> Vec<Entry> {
-    // Versions up to 0.4.1 didn't store what was seen: that is where an
-    // update from one of them comes from.
     since_in(TEXT, if seen.is_empty() { "0.4.1" } else { seen }, current)
+}
+
+/// Only the entry of `current` (a tester whose previous test build is unknown).
+pub fn only(current: &str) -> Vec<Entry> {
+    since_in(TEXT, "", current)
 }
 
 fn since_in(text: &str, seen: &str, current: &str) -> Vec<Entry> {

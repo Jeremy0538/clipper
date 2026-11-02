@@ -115,15 +115,55 @@ pub fn apply(slot: Slot, h: &Hotkey) -> Result<(), String> {
     Ok(())
 }
 
-/// A press seen by the hook and by raw input at (almost) the same moment is
-/// one press: the first path to see it fires, the other is ignored.
+/// A press seen by the hook and by raw input is one press: the first path to
+/// see it fires, the other is ignored when it comes within this time (raw
+/// input can lag behind the hook while a game keeps the CPU busy).
 #[cfg_attr(not(windows), allow(dead_code))]
-const SAME_PRESS_MS: u64 = 400;
+const SAME_PRESS_MS: u64 = 750;
+/// Auto-repeat sends key-downs at least this often while a key is held
+/// (Windows' longest repeat delay is 1 s). A key-down after a longer silence
+/// is a new press, even if its key-up was never seen (Ctrl+Alt+Del, Win+L).
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPEAT_GAP_MS: u64 = 1_100;
 
-/// Both listeners call this on a key-down (not auto-repeat) with the
+/// Milliseconds on a monotonic clock (the wall clock can jump back).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+/// Per listener and slot: is the key held, and when did its last key-down
+/// (or repeat) come. Returns true for a new press, false for auto-repeat.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Held {
+    down: [AtomicBool; 3],
+    last: [std::sync::atomic::AtomicU64; 3],
+}
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Held {
+    const fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
+        Self {
+            down: [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)],
+            last: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+        }
+    }
+    fn key_down(&self, i: usize, now: u64) -> bool {
+        let was_down = self.down[i].swap(true, Ordering::SeqCst);
+        let prev = self.last[i].swap(now, Ordering::SeqCst);
+        !was_down || now.saturating_sub(prev) > REPEAT_GAP_MS
+    }
+    fn key_up(&self, i: usize) {
+        self.down[i].store(false, Ordering::SeqCst);
+    }
+}
+
+/// Both listeners call this on a new press (not auto-repeat) with the
 /// modifiers held at that moment (bit 0 shift, 1 ctrl, 2 alt).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
+fn key_down(vk: u32, mods: u32, via: &'static str, now: u64) -> Option<Slot> {
     use std::sync::atomic::AtomicU64;
     static LAST: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
     // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with F8 and
@@ -134,11 +174,11 @@ fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
     if slot == Slot::Clip && !ARMED.load(Ordering::SeqCst) {
         return None;
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-    let prev = LAST[slot as usize].swap(now, Ordering::SeqCst);
-    if now.saturating_sub(prev) < SAME_PRESS_MS {
+    let prev = LAST[slot as usize].load(Ordering::SeqCst);
+    if prev != 0 && now.saturating_sub(prev) < SAME_PRESS_MS {
         return None;
     }
+    LAST[slot as usize].store(now, Ordering::SeqCst);
     crate::clog!("{slot:?} key pressed ({via})");
     Some(slot)
 }
@@ -190,10 +230,14 @@ pub fn start(app: tauri::AppHandle) {
     }
 
     // ---- low-level hook ----
-    static HOOK_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+    static HOOK: Held = Held::new();
+    static RAW: Held = Held::new();
 
-    unsafe fn held(vk: u16) -> bool {
-        (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0
+    // Modifiers as Windows sees them now (for raw input that is right after
+    // the key, so a held Shift/Ctrl/Alt is included and can never get stuck).
+    fn mods() -> u32 {
+        let held = |vk: u16| unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 };
+        held(VK_SHIFT.0) as u32 | (held(VK_CONTROL.0) as u32) << 1 | (held(VK_MENU.0) as u32) << 2
     }
 
     unsafe extern "system" fn hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -201,13 +245,15 @@ pub fn start(app: tauri::AppHandle) {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
             if let Some(i) = VK.iter().position(|v| v.load(Ordering::SeqCst) == k.vkCode) {
                 match is_down(wp.0 as u32) {
-                    // Auto-repeat sends more key-downs: only the first counts.
-                    Some(true) if !HOOK_DOWN[i].swap(true, Ordering::SeqCst) => {
-                        let mods = held(VK_SHIFT.0) as u32 | (held(VK_CONTROL.0) as u32) << 1 | (held(VK_MENU.0) as u32) << 2;
-                        send(key_down(k.vkCode, mods, "hook"));
+                    // Auto-repeat sends more key-downs: only a new press counts.
+                    Some(true) => {
+                        let now = now_ms();
+                        if HOOK.key_down(i, now) {
+                            send(key_down(k.vkCode, mods(), "hook", now));
+                        }
                     }
-                    Some(false) => HOOK_DOWN[i].store(false, Ordering::SeqCst),
-                    _ => {}
+                    Some(false) => HOOK.key_up(i),
+                    None => {}
                 }
             }
         }
@@ -216,10 +262,6 @@ pub fn start(app: tauri::AppHandle) {
     }
 
     // ---- raw input ----
-    // Raw input reports modifiers as keys too: keep their state here.
-    static RAW_MODS: AtomicU32 = AtomicU32::new(0);
-    static RAW_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
-
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if msg == WM_INPUT {
             let mut raw = RAWINPUT::default();
@@ -229,21 +271,12 @@ pub fn start(app: tauri::AppHandle) {
             if got != u32::MAX && got > 0 && raw.header.dwType == RIM_TYPEKEYBOARD.0 {
                 let kb = raw.data.keyboard;
                 let vk = kb.VKey as u32;
-                if let Some(down) = is_down(kb.Message) {
-                    let bit = match vk {
-                        0x10 | 0xA0 | 0xA1 => 1,
-                        0x11 | 0xA2 | 0xA3 => 2,
-                        0x12 | 0xA4 | 0xA5 => 4,
-                        _ => 0,
-                    };
-                    if bit != 0 {
-                        if down { RAW_MODS.fetch_or(bit, Ordering::SeqCst); } else { RAW_MODS.fetch_and(!bit, Ordering::SeqCst); }
-                    } else if let Some(i) = VK.iter().position(|v| v.load(Ordering::SeqCst) == vk) {
-                        if !down {
-                            RAW_DOWN[i].store(false, Ordering::SeqCst);
-                        } else if !RAW_DOWN[i].swap(true, Ordering::SeqCst) {
-                            send(key_down(vk, RAW_MODS.load(Ordering::SeqCst), "raw"));
-                        }
+                if let (Some(down), Some(i)) = (is_down(kb.Message), VK.iter().position(|v| v.load(Ordering::SeqCst) == vk)) {
+                    let now = now_ms();
+                    if !down {
+                        RAW.key_up(i);
+                    } else if RAW.key_down(i, now) {
+                        send(key_down(vk, mods(), "raw", now));
                     }
                 }
             }
@@ -343,8 +376,21 @@ mod tests {
     #[test]
     fn one_press_from_two_listeners() {
         apply(Slot::Screenshot, &Hotkey { code: "F7".into(), shift: false, ctrl: false, alt: false }).unwrap();
-        assert_eq!(key_down(0x76, 1, "test"), None, "Shift+F7 is not F7");
-        assert_eq!(key_down(0x76, 0, "hook"), Some(Slot::Screenshot));
-        assert_eq!(key_down(0x76, 0, "raw"), None, "same press seen twice");
+        assert_eq!(key_down(0x76, 1, "test", 1000), None, "Shift+F7 is not F7");
+        assert_eq!(key_down(0x76, 0, "hook", 1000), Some(Slot::Screenshot));
+        assert_eq!(key_down(0x76, 0, "raw", 1600), None, "same press, raw input lagging");
+        assert_eq!(key_down(0x76, 0, "hook", 2000), Some(Slot::Screenshot), "next press");
+    }
+
+    #[test]
+    fn repeat_and_lost_key_up() {
+        let h = Held::new();
+        assert!(h.key_down(0, 100));
+        assert!(!h.key_down(0, 600), "auto-repeat");
+        assert!(!h.key_down(0, 640));
+        h.key_up(0);
+        assert!(h.key_down(0, 900));
+        // key-up never arrived (Win+L): a press after a silence still counts
+        assert!(h.key_down(0, 5000));
     }
 }

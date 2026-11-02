@@ -253,13 +253,13 @@ impl ObsManager {
         true
     }
 
-    /// Restart OBS so it picks up new encoder settings (only while it's idle).
     /// Read on the next OBS start; a running OBS also needs SetRecordDirectory.
     pub fn set_incoming(&self, dir: PathBuf) {
         let _ = std::fs::create_dir_all(&dir);
         *self.incoming.lock().unwrap() = dir;
     }
 
+    /// Restart OBS so it picks up new encoder settings (only while it's idle).
     pub fn restart(&self) {
         let Some(pid) = *self.pid.lock().unwrap() else { return };
         self.restarting.store(true, Ordering::SeqCst);

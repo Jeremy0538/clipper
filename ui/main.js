@@ -352,24 +352,32 @@ function syncClipsDir() {
     $(p + "clips-dir-default").classList.toggle("hidden", !settings.clips_dir_custom);
   }
 }
+const CLIP_DIR_BUTTONS = ["clips-dir-change", "clips-dir-default", "su-clips-dir-change", "su-clips-dir-default"];
 async function changeClipsFolder(reset, move) {
-  const buttons = ["clips-dir-change", "clips-dir-default", "su-clips-dir-change", "su-clips-dir-default"].map($);
   try {
     const path = reset ? "" : await invoke("pick_folder", { start: settings.clips_dir });
     if (path === null) return;
-    buttons.forEach((b) => (b.disabled = true));
-    say(move ? "Moving your clips… this can take a while." : "Changing the clips folder…");
-    const dir = await invoke("set_clips_dir", { path, moveClips: move });
-    say("Clips folder: " + dir);
+    CLIP_DIR_BUTTONS.forEach((id) => ($(id).disabled = true));
+    say("Changing the clips folder…");
+    const r = await invoke("set_clips_dir", { path, moveClips: move });
+    say(r.left ? `New clips now go to ${r.dir}. ${r.left} file(s) could not be moved (in use?) and are still in ${r.old}.`
+      : "Clips folder: " + r.dir);
   } catch (err) {
     say(String(err));
   } finally {
-    buttons.forEach((b) => (b.disabled = false));
+    CLIP_DIR_BUTTONS.forEach((id) => ($(id).disabled = false));
     const s = await invoke("get_settings").catch(() => null);
     if (s) { settings.clips_dir = s.clips_dir; settings.clips_dir_custom = s.clips_dir_custom; syncClipsDir(); }
     loadClips();
   }
 }
+// While clips move (can take minutes across drives), the library is in flux:
+// hide it behind a message instead of showing half-moved clips.
+listen("clips-moving", (e) => {
+  document.body.classList.toggle("moving-clips", !!e.payload);
+  if (e.payload) say("Moving your clips… this can take a while. New clips already go to the new folder.");
+  else loadClips();
+});
 for (const p of ["", "su-"]) {
   $(p + "clips-dir-change").onclick = () => changeClipsFolder(false, $(p + "clips-move").checked);
   $(p + "clips-dir-default").onclick = () => changeClipsFolder(true, $(p + "clips-move").checked);

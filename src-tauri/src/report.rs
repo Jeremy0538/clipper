@@ -219,14 +219,27 @@ pub fn github_issue(text: &str, summary: &str) -> (String, String) {
 
 /// Open a URL in the default browser (no shell, so "&" in the URL is safe).
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
+    // ShellExecute may hand the URL to COM shell extensions: it wants its own
+    // thread with COM set up (STA), not an async worker.
     #[cfg(windows)]
-    unsafe {
-        use windows::core::{w, HSTRING};
-        use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
-        let r = ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+    {
+        let url = url.to_string();
+        let code = std::thread::spawn(move || unsafe {
+            use windows::core::{w, HSTRING};
+            use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+            use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+            let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            let r = ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+            if com.is_ok() {
+                CoUninitialize();
+            }
+            r.0 as isize
+        })
+        .join()
+        .unwrap_or(0);
         // Values above 32 mean success.
-        if r.0 as isize <= 32 {
-            return Err(std::io::Error::other(format!("ShellExecute failed ({})", r.0 as isize)));
+        if code <= 32 {
+            return Err(std::io::Error::other(format!("ShellExecute failed ({code})")));
         }
     }
     #[cfg(not(windows))]

@@ -4,6 +4,10 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.4
+- Picking a clips folder that already holds other files (or a whole drive) makes a **Clipper** folder inside it, so your other files are never touched.
+- New clips go to the new folder right away, also while your old clips are still moving.
+
 ## 0.4.3
 - After an update, Clipper shows what's new (like this).
 

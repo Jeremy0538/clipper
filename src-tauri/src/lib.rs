@@ -51,6 +51,8 @@ pub struct AppState {
     pub obs: Arc<ObsManager>,
     /// Where clips live; the user can move it (Settings → Clips folder).
     clips_dir: std::sync::RwLock<PathBuf>,
+    /// Clips are being moved to another folder.
+    moving: AtomicBool,
     /// Videos\Clipper: used when no other folder is chosen.
     default_clips_dir: PathBuf,
     pub status: Mutex<Status>,
@@ -201,7 +203,7 @@ pub(crate) async fn take_screenshot(app: &AppHandle) -> Result<(), String> {
 async fn after_new_file(app: &AppHandle) {
     let st = app.state::<AppState>();
     let limit = st.user.lock().await.storage_limit_gb;
-    if limit <= 0.0 {
+    if limit <= 0.0 || st.moving.load(Ordering::SeqCst) {
         return;
     }
     let (dir, favs) = (st.clips_dir(), clips::Favorites::new(&st.obs.data_dir).load());
@@ -344,7 +346,15 @@ async fn whats_new(state: tauri::State<'_, AppState>) -> Result<Vec<changelog::E
         return Ok(vec![]);
     }
     // A fresh install gets the setup guide, not a list of changes.
-    let entries = if u.setup_done { changelog::since(&u.last_version, current) } else { vec![] };
+    let entries = if !u.setup_done {
+        vec![]
+    } else if u.last_version.is_empty() && u.test_builds {
+        // Test builds before 0.4.3 didn't store the version either; a tester
+        // already saw the earlier ones, so show just this version.
+        changelog::only(current)
+    } else {
+        changelog::since(&u.last_version, current)
+    };
     clog!("what's new: {} → {current}, {} version(s) shown", if u.last_version.is_empty() { "?" } else { &u.last_version }, entries.len());
     u.last_version = current.to_string();
     u.save(&state.settings_file).map_err(|e| e.to_string())?;
@@ -681,7 +691,10 @@ async fn report_github(app: AppHandle, text: String) -> Result<(), String> {
     let summary = report_summary(&app.state::<AppState>()).await;
     let (url, log) = report::github_issue(&text, &summary);
     app.clipboard().write_text(log).map_err(|e| format!("Could not copy the log: {e}"))?;
-    report::open_in_browser(&url).map_err(|e| format!("Could not open the browser: {e}"))
+    tauri::async_runtime::spawn_blocking(move || report::open_in_browser(&url))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("Could not open the browser: {e}"))
 }
 
 /// Version, status and settings for a problem report (no secrets).
@@ -821,42 +834,54 @@ async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<Str
     Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
 }
 
-/// Use another clips folder ("" = back to Videos\Clipper). With `move_clips`,
-/// the clips (and their stars) move along. Returns the folder now in use.
+#[derive(Serialize)]
+struct ClipsDirChange {
+    /// The folder now in use.
+    dir: String,
+    /// Files that could not be moved (in use…): still in `old`.
+    left: usize,
+    old: String,
+}
+
+/// Use another clips folder ("" = back to Videos\Clipper). A folder that
+/// already holds other things gets a "Clipper" folder inside it. New clips go
+/// to the new folder right away; with `move_clips`, the existing clips (and
+/// their stars) follow.
 #[tauri::command]
-async fn set_clips_dir(app: AppHandle, path: String, move_clips: bool) -> Result<String, String> {
+async fn set_clips_dir(app: AppHandle, path: String, move_clips: bool) -> Result<ClipsDirChange, String> {
     let st = app.state::<AppState>();
     if st.status.lock().await.recording {
         return Err("Stop the recording first".into());
     }
+    if st.moving.swap(true, Ordering::SeqCst) {
+        return Err("Clips are still being moved; wait until that is done".into());
+    }
+    let r = change_clips_dir(&app, path.trim(), move_clips).await;
+    st.moving.store(false, Ordering::SeqCst);
+    let _ = app.emit("clips-moving", false);
+    r
+}
+
+async fn change_clips_dir(app: &AppHandle, path: &str, move_clips: bool) -> Result<ClipsDirChange, String> {
+    let st = app.state::<AppState>();
     let old = st.clips_dir();
-    let new = if path.trim().is_empty() { st.default_clips_dir.clone() } else { PathBuf::from(path.trim()) };
+    let new = if path.is_empty() { st.default_clips_dir.clone() } else { clips::target_for(std::path::Path::new(path)) };
     if !new.is_absolute() {
         return Err("Choose a complete folder, like D:\\Clips".into());
     }
     std::fs::create_dir_all(&new).map_err(|e| format!("Can't use {}: {e}", new.display()))?;
-    let probe = new.join(".clipper-write-test");
-    std::fs::write(&probe, b"x").map_err(|e| format!("Clipper can't write in {}: {e}", new.display()))?;
-    let _ = std::fs::remove_file(&probe);
-    let (canon_old, canon_new) = (std::fs::canonicalize(&old).unwrap_or(old.clone()), std::fs::canonicalize(&new).unwrap_or(new.clone()));
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or(p.to_path_buf());
+    let (canon_old, canon_new) = (canon(&old), canon(&new));
     if canon_new != canon_old && (canon_new.starts_with(&canon_old) || canon_old.starts_with(&canon_new)) {
         return Err("Pick a folder that is not inside the current clips folder (or the other way around)".into());
     }
-    if canon_new.starts_with(std::fs::canonicalize(&st.obs.data_dir).unwrap_or(st.obs.data_dir.clone())) {
+    if canon_new.starts_with(canon(&st.obs.data_dir)) {
         return Err("That is Clipper's own data folder; pick another one".into());
     }
+    clips::mark(&new).map_err(|e| format!("Clipper can't write in {}: {e}", new.display()))?;
     app.asset_protocol_scope().allow_directory(&new, true).map_err(|e| e.to_string())?;
 
-    let mut moved = (0, 0);
-    if move_clips && canon_new != canon_old {
-        let _ = app.emit("clips-moving", true);
-        let favs = clips::Favorites::new(&st.obs.data_dir);
-        let (o, n) = (old.clone(), new.clone());
-        let r = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs)).await;
-        let _ = app.emit("clips-moving", false);
-        moved = r.map_err(|e| e.to_string())?;
-    }
-
+    // Switch first, so a clip saved while the old ones move lands in the new folder.
     *st.clips_dir.write().unwrap() = new.clone();
     {
         let mut u = st.user.lock().await;
@@ -870,11 +895,18 @@ async fn set_clips_dir(app: AppHandle, path: String, move_clips: bool) -> Result
             clog!("ERROR SetRecordDirectory: {e:#}");
         }
     }
-    clog!("clips folder {} → {} (moved {}, {} could not be moved)", old.display(), new.display(), moved.0, moved.1);
-    if moved.1 > 0 {
-        return Err(format!("{} file(s) could not be moved (in use?). They are still in {}.", moved.1, old.display()));
+
+    let (mut moved, mut left) = (0, 0);
+    if move_clips && canon_new != canon_old {
+        let _ = app.emit("clips-moving", true);
+        let favs = clips::Favorites::new(&st.obs.data_dir);
+        let (o, n) = (old.clone(), new.clone());
+        (moved, left) = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs))
+            .await
+            .map_err(|e| e.to_string())?;
     }
-    Ok(new.to_string_lossy().into_owned())
+    clog!("clips folder {} → {} (moved {moved}, {left} could not be moved)", old.display(), new.display());
+    Ok(ClipsDirChange { dir: new.to_string_lossy().into_owned(), left, old: old.to_string_lossy().into_owned() })
 }
 
 #[tauri::command]
@@ -1164,6 +1196,10 @@ pub fn run() {
                 }
             }
             std::fs::create_dir_all(&clips_dir)?;
+            // Videos\Clipper is always ours; a chosen folder was marked when chosen.
+            if std::fs::create_dir_all(&default_clips_dir).is_ok() {
+                let _ = clips::mark(&default_clips_dir);
+            }
             // The page may only load files from the clips folder (clips, screenshots)
             // and Clipper's own data folder (editor scrub images, test clip):
             // tauri.conf.json leaves the asset scope empty.
@@ -1202,6 +1238,7 @@ pub fn run() {
             app.manage(AppState {
                 obs: obs.clone(),
                 clips_dir: std::sync::RwLock::new(clips_dir),
+                moving: AtomicBool::new(false),
                 default_clips_dir,
                 status: Mutex::default(),
                 obs_session: AtomicU64::new(0),

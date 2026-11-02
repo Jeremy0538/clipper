@@ -61,12 +61,60 @@ pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf
 /// drive). Folders starting with "." are not listed as games.
 pub const INCOMING: &str = ".incoming";
 
+/// Marks a folder as Clipper's own clips folder. Moving clips out of a folder
+/// and the storage limit only touch folders that have it, so a folder full of
+/// other files (a whole drive, the user's Videos) is never cleaned or emptied.
+pub const MARKER: &str = ".clipper-clips";
+
+pub fn is_ours(dir: &Path) -> bool {
+    dir.join(MARKER).is_file()
+}
+
+pub fn mark(dir: &Path) -> std::io::Result<()> {
+    let f = dir.join(MARKER);
+    if f.is_file() {
+        return Ok(());
+    }
+    fs::write(&f, "This folder is used by Clipper for clips. Don't delete this file.\r\n")?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = f.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            let _ = windows::Win32::Storage::FileSystem::SetFileAttributesW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Nothing in it yet (Windows' own desktop.ini doesn't count).
+pub fn is_empty(dir: &Path) -> bool {
+    fs::read_dir(dir).map(|mut r| r.all(|e| e.is_ok_and(|e| e.file_name() == "desktop.ini"))).unwrap_or(true)
+}
+
+/// The folder clips really go into when the user picks `picked`: the folder
+/// itself when it is empty or already Clipper's, else a "Clipper" folder in it
+/// (picking D:\ gives D:\Clipper, not the whole drive).
+pub fn target_for(picked: &Path) -> PathBuf {
+    if !picked.exists() || is_ours(picked) || is_empty(picked) {
+        picked.to_path_buf()
+    } else {
+        picked.join("Clipper")
+    }
+}
+
 /// Move one file; across drives that is copy + delete.
 fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     if fs::rename(src, dst).is_ok() {
         return Ok(());
     }
-    fs::copy(src, dst)?;
+    if let Err(e) = fs::copy(src, dst) {
+        let _ = fs::remove_file(dst); // no half copy (disk full, file in use)
+        return Err(e);
+    }
     fs::remove_file(src).inspect_err(|_| {
         let _ = fs::remove_file(dst); // keep one copy, the original
     })
@@ -77,6 +125,10 @@ fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// (moved, failed).
 pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
     let (mut moved, mut failed) = (0, 0);
+    if !is_ours(from) {
+        crate::clog!("not moving clips out of {}: not a Clipper folder", from.display());
+        return (0, 0);
+    }
     let mut one = |src: &Path, dir: &Path| {
         let _ = fs::create_dir_all(dir);
         let Some(name) = src.file_name() else { return };
@@ -115,7 +167,7 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
                 }
             }
             let _ = fs::remove_dir(&p); // only when empty
-        } else if p.is_file() && name != "desktop.ini" {
+        } else if p.is_file() && name != "desktop.ini" && name != MARKER {
             one(&p, to);
         }
     }
@@ -322,7 +374,7 @@ impl Favorites {
 /// Storage limit: delete the oldest clips (never starred ones) until the
 /// clips folder is under `limit_gb`. Returns how many were deleted.
 pub fn enforce_limit(clips_dir: &Path, limit_gb: f64, favorites: &[String]) -> usize {
-    if limit_gb <= 0.0 {
+    if limit_gb <= 0.0 || !is_ours(clips_dir) {
         return 0;
     }
     let limit = (limit_gb * 1e9) as u64;
@@ -377,6 +429,8 @@ mod fav_tests {
         // And the storage limit keeps it.
         assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 0);
         assert!(real.join("a.mp4").exists());
+        assert_eq!(super::target_for(&base), base.join("Clipper"), "a folder with other things in it");
+        assert_eq!(super::target_for(&base.join("new")), base.join("new"));
         std::fs::remove_dir_all(base).unwrap();
     }
 }
@@ -396,11 +450,15 @@ mod move_tests {
         std::fs::write(from.join(".incoming/busy.mp4"), "3").unwrap();
         let favs = super::Favorites::new(&data);
         favs.set(&from.join("Game/x.mp4").to_string_lossy(), true);
+        assert_eq!(super::move_all(&from, &to, &favs), (0, 0), "not marked: not ours");
+        super::mark(&from).unwrap();
         assert_eq!(super::move_all(&from, &to, &favs), (2, 0));
         assert_eq!(std::fs::read_to_string(to.join("Game/x (2).mp4")).unwrap(), "1");
         assert!(to.join("y.png").exists() && !from.join("Game").exists());
         assert!(from.join(".incoming/busy.mp4").exists());
         assert!(super::Favorites::has(&favs.load(), &to.join("Game/x (2).mp4").to_string_lossy()));
+        assert_eq!(super::target_for(&base), base.join("Clipper"), "a folder with other things in it");
+        assert_eq!(super::target_for(&base.join("new")), base.join("new"));
         std::fs::remove_dir_all(base).unwrap();
     }
 }
