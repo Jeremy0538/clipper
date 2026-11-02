@@ -89,8 +89,8 @@ pub async fn run(app: AppHandle) {
         // Only retarget when we know a window; never point OBS at "" mid-game.
         if targeted.as_ref() != Some(&want) && !(cfg!(windows) && game.obs_window.is_empty()) {
             if cfg!(windows) {
-                let app_audio = st.obs.settings.lock().unwrap().audio.game_mode
-                    == crate::settings::GameAudioMode::Game;
+                let audio = st.obs.settings.lock().unwrap().audio.clone();
+                let app_audio = audio.game_mode == crate::settings::GameAudioMode::Game;
                 use crate::obs::setup::{GAME_AUDIO, GAME_CAPTURE, WINDOW_CAPTURE};
                 // Games are hooked (Game Capture); added apps are captured as a window.
                 let (video, other) = if game.custom { (WINDOW_CAPTURE, GAME_CAPTURE) } else { (GAME_CAPTURE, WINDOW_CAPTURE) };
@@ -105,14 +105,16 @@ pub async fn run(app: AppHandle) {
                 }
                 let inputs: &[&str] = if app_audio { &[video, GAME_AUDIO] } else { &[video] };
                 for &input in inputs {
+                    let window = if input == GAME_AUDIO { game_audio_target(&game.obs_window, &audio) } else { &game.obs_window };
                     let r = st.obs.client.call("SetInputSettings", json!({
                         "inputName": input,
-                        "inputSettings": { "window": game.obs_window },
+                        "inputSettings": { "window": window },
                         "overlay": true,
                     }))
                     .await;
                     match r {
-                        Ok(_) => clog!("{input} → {}", game.obs_window),
+                        Ok(_) if window.is_empty() => clog!("{input} → nothing ({} already has its own audio source)", game.name),
+                        Ok(_) => clog!("{input} → {window}"),
                         Err(e) => report_error(&app, format!("Could not target {}: {e:#}", game.name)),
                     }
                 }
@@ -141,5 +143,30 @@ pub async fn run(app: AppHandle) {
                 }
             }
         }
+    }
+}
+
+/// Where Game Audio listens while `window` (OBS "title:class:exe") is clipped.
+/// Discord and the extra audio apps already have their own source: pointing
+/// Game Audio at them too put every voice in the clip twice. Then: nothing.
+fn game_audio_target<'a>(window: &'a str, a: &crate::settings::AudioSettings) -> &'a str {
+    let exe = |w: &str| w.rsplit(':').next().unwrap_or("").to_ascii_lowercase();
+    let game = exe(window);
+    let discord = a.discord_enabled && game == "discord.exe";
+    let app = !game.is_empty() && a.apps.iter().take(2).any(|x| x.exe.to_ascii_lowercase() == game);
+    if discord || app { "" } else { window }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn no_double_audio() {
+        let mut a = crate::settings::AudioSettings::default();
+        let d = "@Friend - Discord:Chrome_WidgetWin_1:Discord.exe";
+        assert_eq!(super::game_audio_target(d, &a), "");
+        assert_eq!(super::game_audio_target("RL:LaunchUnrealUWindowsClient:RocketLeague.exe", &a),
+                   "RL:LaunchUnrealUWindowsClient:RocketLeague.exe");
+        a.discord_enabled = false;
+        assert_eq!(super::game_audio_target(d, &a), d);
     }
 }

@@ -342,6 +342,37 @@ async function loadSettings() {
   $("version").textContent = settings.version;
   applyTheme(settings.theme);
   showAudio(settings.audio);
+  syncClipsDir();
+}
+
+// ---------- clips folder (Settings and the setup guide) ----------
+function syncClipsDir() {
+  for (const p of ["", "su-"]) {
+    $(p + "clips-dir").textContent = settings.clips_dir;
+    $(p + "clips-dir-default").classList.toggle("hidden", !settings.clips_dir_custom);
+  }
+}
+async function changeClipsFolder(reset, move) {
+  const buttons = ["clips-dir-change", "clips-dir-default", "su-clips-dir-change", "su-clips-dir-default"].map($);
+  try {
+    const path = reset ? "" : await invoke("pick_folder", { start: settings.clips_dir });
+    if (path === null) return;
+    buttons.forEach((b) => (b.disabled = true));
+    say(move ? "Moving your clips… this can take a while." : "Changing the clips folder…");
+    const dir = await invoke("set_clips_dir", { path, moveClips: move });
+    say("Clips folder: " + dir);
+  } catch (err) {
+    say(String(err));
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+    const s = await invoke("get_settings").catch(() => null);
+    if (s) { settings.clips_dir = s.clips_dir; settings.clips_dir_custom = s.clips_dir_custom; syncClipsDir(); }
+    loadClips();
+  }
+}
+for (const p of ["", "su-"]) {
+  $(p + "clips-dir-change").onclick = () => changeClipsFolder(false, $(p + "clips-move").checked);
+  $(p + "clips-dir-default").onclick = () => changeClipsFolder(true, $(p + "clips-move").checked);
 }
 
 function syncKeyLabels() {
@@ -414,7 +445,7 @@ $("report-send").onclick = async () => {
       $("report-status").textContent = "Sent to your Todoist Inbox, with the logs.";
     } else {
       await invoke("report_github", { text });
-      $("report-status").textContent = "Opened in your browser: check it and press Create.";
+      $("report-status").textContent = "Opened in your browser. The log is on your clipboard: paste it (Ctrl+V) in the report, then press Create.";
     }
     $("report-text").value = "";
   } catch (err) { $("report-status").textContent = "Not sent: " + err; }
@@ -598,6 +629,7 @@ function showAudio(a) {
   $("a-discord-enabled").checked = a.discord_enabled;
   $("a-mic-enabled").checked = a.mic_enabled;
   $("a-mic-noise").checked = a.mic_noise_suppression;
+  $("a-mic-mono").checked = !!a.mic_mono;
   $("a-mic-boost").value = a.mic_boost_db;
   $("a-mic-boost").nextElementSibling.textContent = "+" + a.mic_boost_db + " dB";
   renderAudioApps(a);
@@ -614,7 +646,7 @@ function syncAudioRows() {
   $("row-desktop").classList.toggle("hidden", $("a-game-mode").value !== "desktop");
   $("a-game-volume").disabled = $("a-game-mode").value === "off";
   $("a-discord-volume").disabled = !$("a-discord-enabled").checked;
-  for (const id of ["a-mic-device", "a-mic-volume", "a-mic-noise", "a-mic-boost"]) $(id).disabled = !$("a-mic-enabled").checked;
+  for (const id of ["a-mic-device", "a-mic-volume", "a-mic-noise", "a-mic-mono", "a-mic-boost"]) $(id).disabled = !$("a-mic-enabled").checked;
 }
 
 function selectDevice(id, value) {
@@ -655,6 +687,7 @@ function saveAudio() {
     mic_device: $("a-mic-device").value || "default",
     mic_volume: $("a-mic-volume").value / 100,
     mic_noise_suppression: $("a-mic-noise").checked,
+    mic_mono: $("a-mic-mono").checked,
     mic_boost_db: +$("a-mic-boost").value,
     apps: settings.audio.apps || [],
     app_volumes: settings.audio.app_volumes || [],
@@ -665,7 +698,7 @@ function saveAudio() {
   // Sliders fire continuously: apply once they settle.
   audioTimer = setTimeout(() => invoke("set_audio", { audio: a }).then(() => say("Audio settings saved."), say), 250);
 }
-for (const id of ["a-game-mode", "a-desktop-device", "a-discord-enabled", "a-mic-enabled", "a-mic-device", "a-mic-noise"]) {
+for (const id of ["a-game-mode", "a-desktop-device", "a-discord-enabled", "a-mic-enabled", "a-mic-device", "a-mic-noise", "a-mic-mono"]) {
   $(id).onchange = saveAudio;
 }
 $("a-mic-boost").oninput = (e) => { e.target.nextElementSibling.textContent = "+" + e.target.value + " dB"; saveAudio(); };

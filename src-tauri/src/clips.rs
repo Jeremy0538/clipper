@@ -57,6 +57,71 @@ pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf
     Ok(dst)
 }
 
+/// OBS's folder for fresh replays when the clips folder is a chosen one (same
+/// drive). Folders starting with "." are not listed as games.
+pub const INCOMING: &str = ".incoming";
+
+/// Move one file; across drives that is copy + delete.
+fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst)?;
+    fs::remove_file(src).inspect_err(|_| {
+        let _ = fs::remove_file(dst); // keep one copy, the original
+    })
+}
+
+/// Move everything in the clips folder (files and game folders, not ".…"
+/// folders) into `to`, keeping stars. Existing names get " (2)". Returns
+/// (moved, failed).
+pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
+    let (mut moved, mut failed) = (0, 0);
+    let mut one = |src: &Path, dir: &Path| {
+        let _ = fs::create_dir_all(dir);
+        let Some(name) = src.file_name() else { return };
+        let mut dst = dir.join(name);
+        let (stem, ext) = (
+            src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default(),
+        );
+        let mut n = 2;
+        while dst.exists() {
+            dst = dir.join(format!("{stem} ({n}){ext}"));
+            n += 1;
+        }
+        let key = fav_key(&src.to_string_lossy());
+        match move_file(src, &dst) {
+            Ok(()) => {
+                favs.moved(&key, &dst.to_string_lossy());
+                moved += 1;
+            }
+            Err(e) => {
+                crate::clog!("ERROR could not move {}: {e}", src.display());
+                failed += 1;
+            }
+        }
+    };
+    for e in fs::read_dir(from).into_iter().flatten().flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if name.starts_with('.') {
+                continue;
+            }
+            for f in fs::read_dir(&p).into_iter().flatten().flatten() {
+                if f.path().is_file() {
+                    one(&f.path(), &to.join(&name));
+                }
+            }
+            let _ = fs::remove_dir(&p); // only when empty
+        } else if p.is_file() && name != "desktop.ini" {
+            one(&p, to);
+        }
+    }
+    (moved, failed)
+}
+
 fn videos_in(dir: &Path, folder: &str) -> Vec<ClipInfo> {
     fs::read_dir(dir)
         .into_iter()
@@ -312,6 +377,30 @@ mod fav_tests {
         // And the storage limit keeps it.
         assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 0);
         assert!(real.join("a.mp4").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    #[test]
+    fn moves_clips_and_stars() {
+        let base = std::env::temp_dir().join(format!("clipper-move-{}", std::process::id()));
+        let (from, to, data) = (base.join("a"), base.join("b"), base.join("data"));
+        for d in [from.join("Game"), from.join(".incoming"), to.join("Game"), data.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(from.join("Game/x.mp4"), "1").unwrap();
+        std::fs::write(to.join("Game/x.mp4"), "old").unwrap();
+        std::fs::write(from.join("y.png"), "2").unwrap();
+        std::fs::write(from.join(".incoming/busy.mp4"), "3").unwrap();
+        let favs = super::Favorites::new(&data);
+        favs.set(&from.join("Game/x.mp4").to_string_lossy(), true);
+        assert_eq!(super::move_all(&from, &to, &favs), (2, 0));
+        assert_eq!(std::fs::read_to_string(to.join("Game/x (2).mp4")).unwrap(), "1");
+        assert!(to.join("y.png").exists() && !from.join("Game").exists());
+        assert!(from.join(".incoming/busy.mp4").exists());
+        assert!(super::Favorites::has(&favs.load(), &to.join("Game/x (2).mp4").to_string_lossy()));
         std::fs::remove_dir_all(base).unwrap();
     }
 }

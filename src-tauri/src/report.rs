@@ -1,6 +1,7 @@
 //! "Report a problem".
 //! - Everyone: a GitHub issue on the Clipper repo, opened in the browser with the
-//!   description, a status summary and the end of clipper.log filled in. Issues
+//!   description and a status summary filled in; the end of clipper.log goes
+//!   on the clipboard to paste in. Issues
 //!   are public, so personal details are removed first (`redact`).
 //! - The owner: with a Todoist API token set, the report (with the full log
 //!   tails) goes to their Todoist Inbox instead. The repo is public, so no key
@@ -145,8 +146,12 @@ pub async fn send(data_dir: &Path, text: &str, summary: &str) -> Result<String> 
 }
 
 const ISSUES: &str = "https://github.com/Jeremy0538/clipper/issues/new";
-/// Browsers and GitHub handle URLs up to about 8 KB; stay well below.
-const URL_MAX: usize = 7_000;
+/// Windows hands long URLs to the browser cut off (about 2 KB), and a URL cut
+/// in the middle of a %-code made GitHub answer with an error page. The log
+/// is therefore not put in the URL but on the clipboard.
+const URL_MAX: usize = 1_900;
+/// GitHub's limit for an issue body is 65 536 characters.
+const LOG_MAX: usize = 50_000;
 
 /// Remove what must not end up in a public issue: the Windows user name in
 /// paths, window titles (Discord servers and DMs, browser tabs…) and IP
@@ -186,36 +191,46 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-/// The "new issue" URL with everything filled in (redacted). The log part is
-/// shortened from the top until the URL fits.
-pub fn github_issue_url(text: &str, summary: &str) -> String {
+/// The "new issue" URL (description and status, redacted, short enough for
+/// every browser) and the end of clipper.log (redacted) to paste into it.
+pub fn github_issue(text: &str, summary: &str) -> (String, String) {
     let text = redact(text.trim());
     let first = text.lines().next().unwrap_or("").chars().take(80).collect::<String>();
     let title = url_encode(&format!("{}: {}", env!("CARGO_PKG_VERSION"), if first.is_empty() { "problem report" } else { &first }));
     let summary = redact(summary);
-    let log = crate::log::path().and_then(|p| tail(p, 20_000)).map(|t| redact(&t)).unwrap_or_default();
-    let mut lines: Vec<&str> = log.lines().collect();
-    loop {
-        let body = format!(
-            "**What happened**\n{text}\n\n**Details**\n```\n{summary}\n```\n\n**End of clipper.log** (names, paths and window titles removed)\n```\n{}\n```\n",
-            lines.join("\n")
-        );
+    let paste = "**End of clipper.log**\nClipper copied it to your clipboard: click on this line and press Ctrl+V.\n";
+    let (mut text_len, mut summary_len) = (text.chars().count(), summary.chars().count());
+    let url = loop {
+        let cut = |s: &str, n: usize| -> String {
+            if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
+        };
+        let body = format!("**What happened**\n{}\n\n**Details**\n```\n{}\n```\n\n{paste}", cut(&text, text_len), cut(&summary, summary_len));
         let url = format!("{ISSUES}?title={title}&body={}", url_encode(&body));
-        if url.len() <= URL_MAX || lines.is_empty() {
-            return url;
+        if url.len() <= URL_MAX || (text_len == 0 && summary_len == 0) {
+            break url;
         }
-        let drop = (lines.len() / 5).max(1);
-        lines.drain(..drop.min(lines.len()));
-    }
+        // Shorten the status first, then the description.
+        if summary_len > 0 { summary_len = summary_len.saturating_sub(100) } else { text_len = text_len.saturating_sub(50) }
+    };
+    let log = crate::log::path().and_then(|p| tail(p, LOG_MAX)).map(|t| redact(&t)).unwrap_or_else(|| "(clipper.log could not be read)".into());
+    let clip = format!("```\n{}\n```\n(names, paths and window titles removed)\n", log.trim_end());
+    (url, clip)
 }
 
 /// Open a URL in the default browser (no shell, so "&" in the URL is safe).
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
-    if cfg!(windows) {
-        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()?;
-    } else {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    #[cfg(windows)]
+    unsafe {
+        use windows::core::{w, HSTRING};
+        use windows::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+        let r = ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+        // Values above 32 mean success.
+        if r.0 as isize <= 32 {
+            return Err(std::io::Error::other(format!("ShellExecute failed ({})", r.0 as isize)));
+        }
     }
+    #[cfg(not(windows))]
+    std::process::Command::new("xdg-open").arg(url).spawn()?;
     Ok(())
 }
 
@@ -241,9 +256,13 @@ mod tests {
 
     #[test]
     fn issue_url_fits() {
-        let u = super::github_issue_url(&"x".repeat(20_000), "Version 1");
-        assert!(u.len() < 40_000);
-        assert!(u.starts_with("https://github.com/Jeremy0538/clipper/issues/new?title="));
+        for (text, summary) in [("x".repeat(20_000), "Version 1".to_string()), ("é".repeat(3000), "s".repeat(5000)), ("short".into(), "Version 1".into())] {
+            let (u, _) = super::github_issue(&text, &summary);
+            assert!(u.len() <= super::URL_MAX, "{}", u.len());
+            assert!(u.starts_with("https://github.com/Jeremy0538/clipper/issues/new?title="));
+        }
+        let (u, _) = super::github_issue("short", "Version 1");
+        assert!(u.contains("short") && u.contains("Version%201"));
     }
 
     use super::*;

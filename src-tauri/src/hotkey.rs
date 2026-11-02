@@ -1,5 +1,5 @@
-//! The clip key (default F8, user-configurable). A low-level keyboard hook
-//! only *listens*: the key still reaches the game (a combo like Shift+F can be
+//! The clip key (default F8, user-configurable). A low-level keyboard hook and
+//! raw input only *listen*: the key still reaches the game (a combo like Shift+F can be
 //! sprint + interact). Armed only while the replay buffer runs, so the key does nothing
 //! outside games.
 
@@ -115,53 +115,99 @@ pub fn apply(slot: Slot, h: &Hotkey) -> Result<(), String> {
     Ok(())
 }
 
+/// A press seen by the hook and by raw input at (almost) the same moment is
+/// one press: the first path to see it fires, the other is ignored.
+#[cfg_attr(not(windows), allow(dead_code))]
+const SAME_PRESS_MS: u64 = 400;
+
+/// Both listeners call this on a key-down (not auto-repeat) with the
+/// modifiers held at that moment (bit 0 shift, 1 ctrl, 2 alt).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
+    use std::sync::atomic::AtomicU64;
+    static LAST: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+    // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with F8 and
+    // Shift+F8 on two slots only one of them fires.
+    let slot = [Slot::Clip, Slot::Record, Slot::Screenshot].into_iter().find(|s| {
+        VK[*s as usize].load(Ordering::SeqCst) == vk && MODS[*s as usize].load(Ordering::SeqCst) == mods
+    })?;
+    if slot == Slot::Clip && !ARMED.load(Ordering::SeqCst) {
+        return None;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let prev = LAST[slot as usize].swap(now, Ordering::SeqCst);
+    if now.saturating_sub(prev) < SAME_PRESS_MS {
+        return None;
+    }
+    crate::clog!("{slot:?} key pressed ({via})");
+    Some(slot)
+}
+
+/// Two independent listeners, because either can miss a press on some PCs:
+/// - a low-level keyboard hook. Windows skips (and after a while silently
+///   removes) a hook that doesn't answer fast enough, which happens when a
+///   game keeps the CPU busy: a short tap was then lost, and only holding the
+///   key (auto-repeat) got through.
+/// - raw input (WM_INPUT to a hidden window): posted, never skipped.
+/// Neither blocks the key; it always reaches the game.
 #[cfg(windows)]
 pub fn start(app: tauri::AppHandle) {
     use std::sync::{mpsc, OnceLock};
+    use windows::core::w;
     use windows::Win32::{
-        Foundation::{LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL},
+        },
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
+            Input::{
+                GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
+                RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
+                KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
+            },
             WindowsAndMessaging::{
-                CallNextHookEx, GetMessageW, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
-                WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+                CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
+                RegisterClassW, SetWindowsHookExW, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG,
+                WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
             },
         },
     };
 
     static TX: OnceLock<mpsc::Sender<Slot>> = OnceLock::new();
-    static KEY_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+    fn send(slot: Option<Slot>) {
+        if let (Some(slot), Some(tx)) = (slot, TX.get()) {
+            let _ = tx.send(slot);
+        }
+    }
+    fn is_down(msg: u32) -> Option<bool> {
+        match msg {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
+            WM_KEYUP | WM_SYSKEYUP => Some(false),
+            _ => None,
+        }
+    }
+
+    // ---- low-level hook ----
+    static HOOK_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
 
     unsafe fn held(vk: u16) -> bool {
         (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0
     }
 
-    unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe extern "system" fn hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if code == HC_ACTION as i32 {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
-            for slot in [Slot::Clip, Slot::Record, Slot::Screenshot] {
-                let i = slot as usize;
-                if k.vkCode != VK[i].load(Ordering::SeqCst) {
-                    continue;
-                }
-                let msg = wp.0 as u32;
-                if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                    // Auto-repeat sends more key-downs: fire once per press.
-                    let first = !KEY_DOWN[i].swap(true, Ordering::SeqCst);
-                    let m = MODS[i].load(Ordering::SeqCst);
-                    // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with
-                    // F8 and Shift+F8 on two slots only one of them fires.
-                    let mods_ok = (m & 1 != 0) == held(VK_SHIFT.0)
-                        && (m & 2 != 0) == held(VK_CONTROL.0)
-                        && (m & 4 != 0) == held(VK_MENU.0);
-                    let armed = slot != Slot::Clip || ARMED.load(Ordering::SeqCst);
-                    if first && mods_ok && armed {
-                        if let Some(tx) = TX.get() {
-                            let _ = tx.send(slot);
-                        }
+            if let Some(i) = VK.iter().position(|v| v.load(Ordering::SeqCst) == k.vkCode) {
+                match is_down(wp.0 as u32) {
+                    // Auto-repeat sends more key-downs: only the first counts.
+                    Some(true) if !HOOK_DOWN[i].swap(true, Ordering::SeqCst) => {
+                        let mods = held(VK_SHIFT.0) as u32 | (held(VK_CONTROL.0) as u32) << 1 | (held(VK_MENU.0) as u32) << 2;
+                        send(key_down(k.vkCode, mods, "hook"));
                     }
-                } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
-                    KEY_DOWN[i].store(false, Ordering::SeqCst);
+                    Some(false) => HOOK_DOWN[i].store(false, Ordering::SeqCst),
+                    _ => {}
                 }
             }
         }
@@ -169,12 +215,50 @@ pub fn start(app: tauri::AppHandle) {
         CallNextHookEx(None, code, wp, lp)
     }
 
+    // ---- raw input ----
+    // Raw input reports modifiers as keys too: keep their state here.
+    static RAW_MODS: AtomicU32 = AtomicU32::new(0);
+    static RAW_DOWN: [AtomicBool; 3] = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
+
+    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if msg == WM_INPUT {
+            let mut raw = RAWINPUT::default();
+            let mut size = std::mem::size_of::<RAWINPUT>() as u32;
+            let got = GetRawInputData(HRAWINPUT(lp.0 as _), RID_INPUT, Some(&mut raw as *mut _ as *mut _),
+                &mut size, std::mem::size_of::<RAWINPUTHEADER>() as u32);
+            if got != u32::MAX && got > 0 && raw.header.dwType == RIM_TYPEKEYBOARD.0 {
+                let kb = raw.data.keyboard;
+                let vk = kb.VKey as u32;
+                if let Some(down) = is_down(kb.Message) {
+                    let bit = match vk {
+                        0x10 | 0xA0 | 0xA1 => 1,
+                        0x11 | 0xA2 | 0xA3 => 2,
+                        0x12 | 0xA4 | 0xA5 => 4,
+                        _ => 0,
+                    };
+                    if bit != 0 {
+                        if down { RAW_MODS.fetch_or(bit, Ordering::SeqCst); } else { RAW_MODS.fetch_and(!bit, Ordering::SeqCst); }
+                    } else if let Some(i) = VK.iter().position(|v| v.load(Ordering::SeqCst) == vk) {
+                        if !down {
+                            RAW_DOWN[i].store(false, Ordering::SeqCst);
+                        } else if !RAW_DOWN[i].swap(true, Ordering::SeqCst) {
+                            send(key_down(vk, RAW_MODS.load(Ordering::SeqCst), "raw"));
+                        }
+                    }
+                }
+            }
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
+    }
+
     let (tx, rx) = mpsc::channel::<Slot>();
     let _ = TX.set(tx);
 
-    // The hook needs a thread with a message loop; keep the callback tiny.
+    // The hook needs a thread with a message loop; keep the callback tiny and
+    // let it run before the game's threads, so Windows never times it out.
     std::thread::spawn(|| unsafe {
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), None, 0) {
             Ok(_) => {
                 crate::clog!("keyboard hook installed");
                 let mut msg = MSG::default();
@@ -183,18 +267,42 @@ pub fn start(app: tauri::AppHandle) {
             Err(e) => crate::clog!("ERROR keyboard hook failed: {e}"),
         }
     });
+    std::thread::spawn(|| unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        let r = (|| -> windows::core::Result<()> {
+            let inst = GetModuleHandleW(None)?.into();
+            let class = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: inst, lpszClassName: w!("ClipperRawKeys"), ..Default::default() };
+            if RegisterClassW(&class) == 0 {
+                return Err(windows::core::Error::from_win32());
+            }
+            let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("ClipperRawKeys"), w!(""), WINDOW_STYLE(0),
+                0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(inst), None)?;
+            // Keyboard (generic desktop page 1, usage 6), also while another app has focus.
+            let dev = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+            RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32)?;
+            Ok(())
+        })();
+        match r {
+            Ok(()) => {
+                crate::clog!("raw keyboard input registered");
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+            }
+            Err(e) => crate::clog!("ERROR raw keyboard input failed: {e}"),
+        }
+    });
     std::thread::spawn(move || {
         for slot in rx {
             let app = app.clone();
             match slot {
                 Slot::Clip => {
-                    crate::clog!("clip key pressed");
                     tauri::async_runtime::spawn(async move {
                         let _ = crate::save_clip_inner(&app).await; // errors are reported inside
                     });
                 }
                 Slot::Screenshot => {
-                    crate::clog!("screenshot key pressed");
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = crate::take_screenshot(&app).await {
                             crate::report_error(&app, format!("Screenshot: {e}"));
@@ -202,7 +310,6 @@ pub fn start(app: tauri::AppHandle) {
                     });
                 }
                 Slot::Record => {
-                    crate::clog!("record key pressed");
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = crate::modes::toggle_recording(&app).await {
                             crate::report_error(&app, format!("Recording: {e}"));
@@ -231,5 +338,13 @@ mod tests {
         assert_eq!((c.vk(), c.label().as_str()), (Some(0x33), "Ctrl+Alt+3"));
         assert_eq!(Hotkey { code: "ShiftLeft".into(), ..h.clone() }.vk(), None);
         assert_eq!(Hotkey { code: "Fn".into(), ..h }.vk(), None);
+    }
+
+    #[test]
+    fn one_press_from_two_listeners() {
+        apply(Slot::Screenshot, &Hotkey { code: "F7".into(), shift: false, ctrl: false, alt: false }).unwrap();
+        assert_eq!(key_down(0x76, 1, "test"), None, "Shift+F7 is not F7");
+        assert_eq!(key_down(0x76, 0, "hook"), Some(Slot::Screenshot));
+        assert_eq!(key_down(0x76, 0, "raw"), None, "same press seen twice");
     }
 }

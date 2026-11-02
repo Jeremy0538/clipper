@@ -15,6 +15,10 @@ pub const WINDOW_CAPTURE: &str = "Window Capture";
 pub const GAME_AUDIO: &str = "Game Audio";
 pub const DISCORD: &str = "Discord";
 pub const MIC: &str = "Mic";
+/// Read by the OBS script from `config::MONO_SCRIPT`: OBS's "Downmix to mono"
+/// is a source flag the websocket can't set, so the wish travels in the Mic
+/// input's own settings and the script applies it.
+pub const MONO_KEY: &str = "clipper_mono";
 pub const APP_INPUTS: [&str; 2] = ["App 1", "App 2"];
 /// The webcam overlay was removed in 0.3.1 (OBS held the camera, so Discord
 /// couldn't use it). Still removed here so an older install lets go of it.
@@ -151,7 +155,7 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
         v.push(InputSpec {
             name: MIC,
             kind: "wasapi_input_capture",
-            settings: json!({ "device_id": a.mic_device }),
+            settings: json!({ "device_id": a.mic_device, MONO_KEY: a.mic_mono }),
             tracks: &[1, 4],
             fit: false,
             volume: a.mic_volume,
@@ -225,7 +229,7 @@ pub fn specs(dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
         v.push(InputSpec {
             name: MIC,
             kind: "ffmpeg_source",
-            settings: media(file("dev-mic.m4a")),
+            settings: { let mut m = media(file("dev-mic.m4a")); m[MONO_KEY] = a.mic_mono.into(); m },
             tracks: &[1, 4],
             fit: false,
             volume: a.mic_volume,

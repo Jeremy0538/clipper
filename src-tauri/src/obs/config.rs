@@ -187,6 +187,8 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
         serde_json::to_string(&encoder_settings(s))?,
     )?;
 
+    write_mono_script(c)?;
+
     // An empty scene; inputs are (re)created over the websocket on every start.
     let collection = scenes.join(format!("{COLLECTION}.json"));
     if !collection.exists() {
@@ -206,5 +208,65 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
             }))?,
         )?;
     }
+    register_script(&collection, &c.join(MONO_SCRIPT))?;
+    Ok(())
+}
+
+/// OBS script (Lua is built into OBS) that applies the mono setting of the Mic.
+pub const MONO_SCRIPT: &str = "clipper-mono.lua";
+
+fn write_mono_script(config: &Path) -> Result<()> {
+    let script = format!(
+        r#"-- Written by Clipper on every start. Applies "Downmix to mono" to the
+-- Mic input, which the websocket cannot set: Clipper puts the wish in the
+-- input's settings ("{key}").
+obs = obslua
+local MONO = 2 -- OBS_SOURCE_FLAG_FORCE_MONO
+
+function script_description() return "Clipper: microphone mono setting" end
+
+local function tick()
+  local src = obs.obs_get_source_by_name("{mic}")
+  if src == nil then return end
+  local s = obs.obs_source_get_settings(src)
+  local want = obs.obs_data_get_bool(s, "{key}")
+  obs.obs_data_release(s)
+  local flags = obs.obs_source_get_flags(src)
+  local has = math.floor(flags / MONO) % 2 == 1
+  if want ~= has then
+    obs.obs_source_set_flags(src, want and flags + MONO or flags - MONO)
+    obs.script_log(obs.LOG_INFO, "Mic mono " .. (want and "on" or "off"))
+  end
+  obs.obs_source_release(src)
+end
+
+function script_load(settings) obs.timer_add(tick, 500) end
+function script_unload() obs.timer_remove(tick) end
+"#,
+        key = super::setup::MONO_KEY,
+        mic = super::setup::MIC,
+    );
+    fs::write(config.join(MONO_SCRIPT), script)?;
+    Ok(())
+}
+
+/// Scripts are loaded per scene collection (OBS's "scripts-tool" module data).
+fn register_script(collection: &Path, script: &Path) -> Result<()> {
+    let mut doc: serde_json::Value = serde_json::from_str(&fs::read_to_string(collection)?)?;
+    let path = ini_path(script);
+    if !doc["modules"].is_object() {
+        doc["modules"] = serde_json::json!({});
+    }
+    let list = &mut doc["modules"]["scripts-tool"];
+    if !list.is_array() {
+        *list = serde_json::json!([]);
+    }
+    let arr = list.as_array_mut().unwrap();
+    if arr.iter().any(|e| e["path"] == path.as_str()) {
+        return Ok(());
+    }
+    arr.retain(|e| !e["path"].as_str().is_some_and(|p| p.ends_with(MONO_SCRIPT)));
+    arr.push(serde_json::json!({ "path": path, "settings": {} }));
+    fs::write(collection, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }

@@ -48,7 +48,10 @@ pub struct Status {
 
 pub struct AppState {
     pub obs: Arc<ObsManager>,
-    pub clips_dir: PathBuf,
+    /// Where clips live; the user can move it (Settings → Clips folder).
+    clips_dir: std::sync::RwLock<PathBuf>,
+    /// Videos\Clipper: used when no other folder is chosen.
+    default_clips_dir: PathBuf,
     pub status: Mutex<Status>,
     /// Bumped every time OBS (re)starts and is ready; inputs must be retargeted.
     pub obs_session: AtomicU64,
@@ -65,6 +68,12 @@ pub struct AppState {
     pub last_game: std::sync::Mutex<Option<String>>,
     /// Folder for the recording that is running (decided when it starts).
     pub rec_folder: std::sync::Mutex<Option<String>>,
+}
+
+impl AppState {
+    pub fn clips_dir(&self) -> PathBuf {
+        self.clips_dir.read().unwrap().clone()
+    }
 }
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
@@ -167,7 +176,7 @@ pub(crate) async fn take_screenshot(app: &AppHandle) -> Result<(), String> {
         tokio::time::sleep(std::time::Duration::from_millis(600)).await; // let a frame render
     }
     let folder = game.unwrap_or_else(|| "Screenshots".into());
-    let dir = st.clips_dir.join(clips::sanitize(&folder));
+    let dir = st.clips_dir().join(clips::sanitize(&folder));
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{} {}.png", clips::sanitize(&folder), chrono::Local::now().format("%Y-%m-%d %H-%M-%S")));
     let r = async {
@@ -194,7 +203,7 @@ async fn after_new_file(app: &AppHandle) {
     if limit <= 0.0 {
         return;
     }
-    let (dir, favs) = (st.clips_dir.clone(), clips::Favorites::new(&st.obs.data_dir).load());
+    let (dir, favs) = (st.clips_dir(), clips::Favorites::new(&st.obs.data_dir).load());
     let n = tauri::async_runtime::spawn_blocking(move || clips::enforce_limit(&dir, limit, &favs)).await.unwrap_or(0);
     if n > 0 {
         notify::info(app, "Storage limit", format!("Deleted {n} old clip(s)"));
@@ -208,7 +217,7 @@ async fn screenshot(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) -> Result<String, String> {
-    let p = clips::checked(&state.clips_dir, &path)?;
+    let p = clips::checked(&state.clips_dir(), &path)?;
     if name.trim().is_empty() {
         return Err("Give the clip a name".into());
     }
@@ -222,7 +231,7 @@ fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) ->
 
 #[tauri::command]
 fn set_favorite(state: tauri::State<'_, AppState>, path: String, on: bool) -> Result<(), String> {
-    let p = clips::checked(&state.clips_dir, &path)?;
+    let p = clips::checked(&state.clips_dir(), &path)?;
     clips::Favorites::new(&state.obs.data_dir).set(&p.to_string_lossy(), on);
     Ok(())
 }
@@ -314,6 +323,9 @@ struct SettingsView {
     version: String,
     audio: AudioSettings,
     setup_done: bool,
+    clips_dir: String,
+    /// The clips folder is not the default Videos\Clipper.
+    clips_dir_custom: bool,
     /// A Todoist token is stored, so "Report a problem" can send.
     report_ready: bool,
     /// Which chip encodes, e.g. "NVIDIA (NVENC)".
@@ -351,6 +363,8 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
         setup_done: u.setup_done,
+        clips_dir: state.clips_dir().to_string_lossy().into_owned(),
+        clips_dir_custom: state.clips_dir() != state.default_clips_dir,
         report_ready: report::token(&state.obs.data_dir).is_some(),
         encoder: if state.obs.settings.lock().unwrap().force_cpu { gpu::Vendor::Cpu } else { gpu::detect() }.label().into(),
         gpu_encoding: !state.obs.settings.lock().unwrap().force_cpu && gpu::detect() != gpu::Vendor::Cpu,
@@ -643,10 +657,12 @@ async fn report_problem(state: tauri::State<'_, AppState>, text: String) -> Resu
 /// Everyone without a Todoist token: open a filled-in GitHub issue (personal
 /// details removed) in the browser; the user checks it and presses Submit.
 #[tauri::command]
-async fn report_github(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
+async fn report_github(app: AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
     clog!("problem report via GitHub: {}", text.chars().take(300).collect::<String>().replace('\n', " / "));
-    let summary = report_summary(&state).await;
-    let url = report::github_issue_url(&text, &summary);
+    let summary = report_summary(&app.state::<AppState>()).await;
+    let (url, log) = report::github_issue(&text, &summary);
+    app.clipboard().write_text(log).map_err(|e| format!("Could not copy the log: {e}"))?;
     report::open_in_browser(&url).map_err(|e| format!("Could not open the browser: {e}"))
 }
 
@@ -681,7 +697,7 @@ fn open_log_folder() -> Result<(), String> {
 
 #[tauri::command]
 fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    let p = clips::checked(&state.clips_dir, &path)?;
+    let p = clips::checked(&state.clips_dir(), &path)?;
     clips::trash(&p)?;
     clog!("clip moved to the recycle bin: {}", p.display());
     Ok(())
@@ -694,7 +710,7 @@ fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), St
 #[tauri::command]
 async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result<String, String> {
     let st = app.state::<AppState>();
-    let p = clips::checked(&st.clips_dir, &path)?;
+    let p = clips::checked(&st.clips_dir(), &path)?;
     let size_mb = std::fs::metadata(&p).map(|m| m.len() as f64 / 1e6).unwrap_or(f64::MAX);
     let is_image = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("jpg"));
     let (file, kind) = match max_mb {
@@ -766,13 +782,87 @@ fn clean_share_dir(data_dir: &std::path::Path) {
 
 #[tauri::command]
 fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    clips::reveal(&clips::checked(&state.clips_dir, &path)?)
+    clips::reveal(&clips::checked(&state.clips_dir(), &path)?)
+}
+
+/// Where OBS writes a clip before Clipper moves it into the clips folder: on
+/// the same drive, so the move is instant and big recordings don't fill C:.
+fn incoming_dir(data_dir: &std::path::Path, clips_dir: &std::path::Path, default: &std::path::Path) -> PathBuf {
+    if clips_dir == default { data_dir.join("incoming") } else { clips_dir.join(clips::INCOMING) }
+}
+
+/// Windows folder picker. None when cancelled.
+#[tauri::command]
+async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut d = app.dialog().file().set_title("Choose a folder for your clips");
+    if let Some(s) = start.filter(|s| std::path::Path::new(s).is_dir()) {
+        d = d.set_directory(s);
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || d.blocking_pick_folder()).await.map_err(|e| e.to_string())?;
+    Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// Use another clips folder ("" = back to Videos\Clipper). With `move_clips`,
+/// the clips (and their stars) move along. Returns the folder now in use.
+#[tauri::command]
+async fn set_clips_dir(app: AppHandle, path: String, move_clips: bool) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    if st.status.lock().await.recording {
+        return Err("Stop the recording first".into());
+    }
+    let old = st.clips_dir();
+    let new = if path.trim().is_empty() { st.default_clips_dir.clone() } else { PathBuf::from(path.trim()) };
+    if !new.is_absolute() {
+        return Err("Choose a complete folder, like D:\\Clips".into());
+    }
+    std::fs::create_dir_all(&new).map_err(|e| format!("Can't use {}: {e}", new.display()))?;
+    let probe = new.join(".clipper-write-test");
+    std::fs::write(&probe, b"x").map_err(|e| format!("Clipper can't write in {}: {e}", new.display()))?;
+    let _ = std::fs::remove_file(&probe);
+    let (canon_old, canon_new) = (std::fs::canonicalize(&old).unwrap_or(old.clone()), std::fs::canonicalize(&new).unwrap_or(new.clone()));
+    if canon_new != canon_old && (canon_new.starts_with(&canon_old) || canon_old.starts_with(&canon_new)) {
+        return Err("Pick a folder that is not inside the current clips folder (or the other way around)".into());
+    }
+    if canon_new.starts_with(std::fs::canonicalize(&st.obs.data_dir).unwrap_or(st.obs.data_dir.clone())) {
+        return Err("That is Clipper's own data folder; pick another one".into());
+    }
+    app.asset_protocol_scope().allow_directory(&new, true).map_err(|e| e.to_string())?;
+
+    let mut moved = (0, 0);
+    if move_clips && canon_new != canon_old {
+        let _ = app.emit("clips-moving", true);
+        let favs = clips::Favorites::new(&st.obs.data_dir);
+        let (o, n) = (old.clone(), new.clone());
+        let r = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs)).await;
+        let _ = app.emit("clips-moving", false);
+        moved = r.map_err(|e| e.to_string())?;
+    }
+
+    *st.clips_dir.write().unwrap() = new.clone();
+    {
+        let mut u = st.user.lock().await;
+        u.clips_dir = if new == st.default_clips_dir { String::new() } else { new.to_string_lossy().into_owned() };
+        u.save(&st.settings_file).map_err(|e| e.to_string())?;
+    }
+    let incoming = incoming_dir(&st.obs.data_dir, &new, &st.default_clips_dir);
+    st.obs.set_incoming(incoming.clone());
+    if st.obs.client.is_connected().await {
+        if let Err(e) = st.obs.client.call("SetRecordDirectory", json!({ "recordDirectory": incoming.to_string_lossy() })).await {
+            clog!("ERROR SetRecordDirectory: {e:#}");
+        }
+    }
+    clog!("clips folder {} → {} (moved {}, {} could not be moved)", old.display(), new.display(), moved.0, moved.1);
+    if moved.1 > 0 {
+        return Err(format!("{} file(s) could not be moved (in use?). They are still in {}.", moved.1, old.display()));
+    }
+    Ok(new.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
 fn open_clips_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
-    std::process::Command::new(opener).arg(&state.clips_dir).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new(opener).arg(&state.clips_dir()).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -787,7 +877,7 @@ async fn tools_for(app: &AppHandle) -> Result<tools::Tools, String> {
 #[tauri::command]
 async fn editor_open(app: AppHandle, path: String) -> Result<editor::ClipInfo, String> {
     let st = app.state::<AppState>();
-    let p = clips::checked(&st.clips_dir, &path)?;
+    let p = clips::checked(&st.clips_dir(), &path)?;
     let tools = tools_for(&app).await?;
     // A fresh folder per opened clip: scrub images still being made for a
     // previous clip can't end up in this one.
@@ -812,7 +902,7 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
     clog!("editor: export {:.2}-{:.2} volumes {:?}", request.start, request.end, request.volumes);
     let h = app.clone();
     // The edited copy goes next to the original (its game folder).
-    let folder = std::path::Path::new(&info.path).parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir.clone());
+    let folder = std::path::Path::new(&info.path).parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir());
     let out = editor::export(&tools, &folder, &info, &request, move |p| { let _ = h.emit("export-progress", p); })
         .await
         .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
@@ -855,12 +945,12 @@ async fn editor_track(state: tauri::State<'_, AppState>, path: String, index: us
 #[tauri::command]
 async fn combine_clips(app: AppHandle, paths: Vec<String>) -> Result<String, String> {
     let st = app.state::<AppState>();
-    let ps = paths.iter().map(|p| clips::checked(&st.clips_dir, p)).collect::<Result<Vec<_>, _>>()?;
+    let ps = paths.iter().map(|p| clips::checked(&st.clips_dir(), p)).collect::<Result<Vec<_>, _>>()?;
     if ps.len() < 2 {
         return Err("Pick at least two clips".into());
     }
     let tools = tools_for(&app).await?;
-    let dir = ps[0].parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir.clone());
+    let dir = ps[0].parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir());
     clog!("combine {} clips", ps.len());
     let h = app.clone();
     let out = editor::combine(&tools, &dir, &ps, move |p| { let _ = h.emit("combine-progress", p); })
@@ -883,7 +973,7 @@ async fn editor_close(state: tauri::State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
     let favs = clips::Favorites::new(&state.obs.data_dir).load();
-    let mut v = clips::list(&state.clips_dir);
+    let mut v = clips::list(&state.clips_dir());
     for c in &mut v {
         c.favorite = clips::Favorites::has(&favs, &c.path);
     }
@@ -924,7 +1014,7 @@ async fn watch_events(app: AppHandle) {
                     None => st.last_game.lock().unwrap().clone(),
                 };
                 clog!("OBS wrote {src}");
-                match clips::adopt(src.as_ref(), &st.clips_dir, game.as_deref()) {
+                match clips::adopt(src.as_ref(), &st.clips_dir(), game.as_deref()) {
                     Ok(p) => {
                         clog!("clip saved: {}", p.display());
                         let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -951,7 +1041,7 @@ async fn watch_events(app: AppHandle) {
                     let st = app.state::<AppState>();
                     if let Some(src) = d["outputPath"].as_str() {
                         let folder = st.rec_folder.lock().unwrap().take().unwrap_or_else(|| "Screen recording".into());
-                        match clips::adopt(src.as_ref(), &st.clips_dir, Some(&folder)) {
+                        match clips::adopt(src.as_ref(), &st.clips_dir(), Some(&folder)) {
                             Ok(p) => {
                                 clog!("recording saved: {}", p.display());
                                 notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
@@ -1019,6 +1109,8 @@ pub fn run() {
         // A second start (desktop icon while it runs in the tray) opens the
         // running Clipper instead of starting another OBS.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_status, start_buffer, stop_buffer, save_clip, list_clips, get_settings, set_hotkey,
             set_buffer, set_option, open_log_folder, set_audio,
@@ -1029,7 +1121,7 @@ pub fn run() {
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
-            set_report_token, report_problem, report_github, share_clip
+            set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1037,11 +1129,22 @@ pub fn run() {
                 Some(d) => d,
                 None => app.path().app_data_dir()?,
             };
-            let clips_dir = match dir_from_env("CLIPPER_CLIPS_DIR") {
+            std::fs::create_dir_all(&data_dir)?;
+            let settings_file = data_dir.join("settings.json");
+            let user = UserSettings::load(&settings_file);
+            let default_clips_dir = match dir_from_env("CLIPPER_CLIPS_DIR") {
                 Some(d) => d,
                 None => app.path().video_dir()?.join("Clipper"),
             };
-            std::fs::create_dir_all(&data_dir)?;
+            // A chosen folder on a drive that is gone (USB disk unplugged): use
+            // the default for now, but keep the choice for the next start.
+            let mut clips_dir = default_clips_dir.clone();
+            if !user.clips_dir.is_empty() {
+                let chosen = PathBuf::from(&user.clips_dir);
+                if std::fs::create_dir_all(&chosen).is_ok() {
+                    clips_dir = chosen;
+                }
+            }
             std::fs::create_dir_all(&clips_dir)?;
             // The page may only load files from the clips folder (clips, screenshots)
             // and Clipper's own data folder (editor scrub images, test clip):
@@ -1055,9 +1158,9 @@ pub fn run() {
             let _ = std::fs::remove_dir_all(data_dir.join("editor-cache"));
             clean_share_dir(&data_dir);
             clog!("data {} | clips {}", data_dir.display(), clips_dir.display());
-
-            let settings_file = data_dir.join("settings.json");
-            let user = UserSettings::load(&settings_file);
+            if !user.clips_dir.is_empty() && clips_dir == default_clips_dir {
+                clog!("ERROR chosen clips folder {} is not available; using {}", user.clips_dir, clips_dir.display());
+            }
             autostart::apply(user.autostart);
             hotkey::apply(hotkey::Slot::Clip, &user.hotkey)?;
             hotkey::apply(hotkey::Slot::Record, &user.record_hotkey)?;
@@ -1077,9 +1180,11 @@ pub fn run() {
                 settings.height = m.size().height & !1;
             }
             let obs = ObsManager::new(data_dir, settings)?;
+            obs.set_incoming(incoming_dir(&obs.data_dir, &clips_dir, &default_clips_dir));
             app.manage(AppState {
                 obs: obs.clone(),
-                clips_dir,
+                clips_dir: std::sync::RwLock::new(clips_dir),
+                default_clips_dir,
                 status: Mutex::default(),
                 obs_session: AtomicU64::new(0),
                 user_stopped: AtomicBool::new(false),

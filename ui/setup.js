@@ -58,11 +58,13 @@ function suFill() {
   $("su-discord").checked = a.discord_enabled;
   $("su-mic").checked = a.mic_enabled;
   $("su-noise").checked = a.mic_noise_suppression;
+  $("su-mono").checked = !!a.mic_mono;
   radio("su-q", settings.quality);
   $("su-storage").value = String(settings.storage_limit_gb);
   $("su-autostart").checked = settings.autostart;
   $("su-sound").checked = settings.sound;
   $("su-toast").checked = settings.toast;
+  syncClipsDir();
   const enc = $("su-encoder");
   enc.classList.toggle("warn", !settings.gpu_encoding);
   enc.textContent = settings.gpu_encoding
@@ -138,6 +140,7 @@ $("su-discord").onchange = (e) => suSave(suAudio({ discord_enabled: e.target.che
 $("su-mic").onchange = (e) => { suSync(); suSave(suAudio({ mic_enabled: e.target.checked })); };
 $("su-mic-device").onchange = (e) => suSave(suAudio({ mic_device: e.target.value || "default" }));
 $("su-noise").onchange = (e) => suSave(suAudio({ mic_noise_suppression: e.target.checked }));
+$("su-mono").onchange = (e) => suSave(suAudio({ mic_mono: e.target.checked }));
 for (const r of document.querySelectorAll('input[name="su-q"]')) {
   r.onchange = () => suSave(invoke("set_quality", { quality: r.value }).then(() => { settings.quality = r.value; $("quality").value = r.value; }));
 }

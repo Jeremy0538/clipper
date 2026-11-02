@@ -25,7 +25,7 @@ pub struct ObsManager {
     pub paths: ObsPaths,
     pub data_dir: PathBuf,
     /// OBS saves replays here; the app moves them into the clips folder.
-    pub incoming: PathBuf,
+    incoming: Mutex<PathBuf>,
     /// Read again on every OBS (re)start; the buffer length can change at runtime.
     pub settings: Mutex<Settings>,
     password: String,
@@ -44,7 +44,7 @@ impl ObsManager {
             paths: ObsPaths::resolve(&data_dir),
             password: config::ws_password(&data_dir)?,
             data_dir,
-            incoming,
+            incoming: Mutex::new(incoming),
             settings: Mutex::new(settings),
             pid: Mutex::new(None),
             quitting: AtomicBool::new(false),
@@ -85,7 +85,8 @@ impl ObsManager {
             }
         }
         let settings = self.settings.lock().unwrap().clone();
-        config::write_all(&self.paths, &settings, &self.incoming, &self.password)?;
+        let incoming = self.incoming.lock().unwrap().clone();
+        config::write_all(&self.paths, &settings, &incoming, &self.password)?;
         #[cfg(not(windows))]
         setup::ensure_dev_media(&self.data_dir)?;
 
@@ -253,6 +254,12 @@ impl ObsManager {
     }
 
     /// Restart OBS so it picks up new encoder settings (only while it's idle).
+    /// Read on the next OBS start; a running OBS also needs SetRecordDirectory.
+    pub fn set_incoming(&self, dir: PathBuf) {
+        let _ = std::fs::create_dir_all(&dir);
+        *self.incoming.lock().unwrap() = dir;
+    }
+
     pub fn restart(&self) {
         let Some(pid) = *self.pid.lock().unwrap() else { return };
         self.restarting.store(true, Ordering::SeqCst);

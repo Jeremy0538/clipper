@@ -133,6 +133,8 @@
           <div class="callout hidden" id="su-mic-msg"></div>
           <div class="row"><span>Noise suppression</span><input type="checkbox" id="su-noise"></div>
           <p class="hint">Removes keyboard and fan noise from your voice.</p>
+          <div class="row"><span>Mono</span><input type="checkbox" id="su-mono"></div>
+          <p class="hint">Do you hear yourself only on the left or right in a clip? Turn this on.</p>
         </div>
       </section>
 
@@ -150,6 +152,10 @@
             <option value="100">100 GB</option><option value="200">200 GB</option><option value="500">500 GB</option>
           </select></div>
         <p class="hint">Above the limit the oldest clips are deleted. Starred clips are always kept.</p>
+        <div class="row"><span>Clips folder</span><code id="su-clips-dir" class="path"></code></div>
+        <div class="row"><label><input type="checkbox" id="su-clips-move" checked> Move my clips there too</label><span class="spacer"></span>
+          <button id="su-clips-dir-default" class="hidden">Back to Videos\Clipper</button><button id="su-clips-dir-change">Change…</button></div>
+        <p class="hint">Small C: drive? Pick a folder on another drive.</p>
       </section>
 
       <section class="step" data-title="Extras">
@@ -226,6 +232,10 @@
           <option value="100">100 GB</option><option value="200">200 GB</option><option value="500">500 GB</option>
         </select></div>
       <p class="hint">Above the limit the oldest clips are deleted automatically. Starred (★) clips are always kept.</p>
+      <div class="row"><span>Clips folder</span><code id="clips-dir" class="path"></code></div>
+      <div class="row"><label><input type="checkbox" id="clips-move" checked> Move my clips there too</label><span class="spacer"></span>
+        <button id="clips-dir-default" class="hidden">Back to Videos\Clipper</button><button id="clips-dir-change">Change…</button></div>
+      <p class="hint">Put your clips on another drive, for example when C: is small. Moving a lot of clips to another drive can take a while.</p>
       <div class="row"><span>Screen to record (no game)</span><select id="screen-monitor"></select></div>
       <p class="hint">Used by Record and by Start clipping when no game is running.</p>
     </section>
@@ -266,6 +276,8 @@
       <div class="row"><span>Level</span><div class="meter" data-inputs="Mic"><i></i></div></div>
       <p class="hint">Talk normally: the level should reach the yellow part. Too quiet? Raise Boost. A limiter keeps it from clipping.</p>
       <div class="row"><span>Noise suppression</span><input type="checkbox" id="a-mic-noise"></div>
+      <div class="row"><span>Mono</span><input type="checkbox" id="a-mic-mono"></div>
+      <p class="hint">For microphones that are only heard on the left or right side of a clip.</p>
 
       <h3>Other apps</h3>
       <p class="hint">Record up to two more apps (music, browser…) on their own tracks.</p>
@@ -307,7 +319,7 @@
       <h2>Troubleshooting</h2>
       <div class="row"><span>Log file and OBS logs</span><button id="logs">Open log folder</button></div>
       <h3>Report a problem</h3>
-      <p class="hint">Describe what went wrong and when. Clipper opens a new report on GitHub in your browser with the details and the end of the log filled in; check it and press "Create". Your user name, window titles and IP address are removed first. You need a free GitHub account.</p>
+      <p class="hint">Describe what went wrong and when. Clipper opens a new report on GitHub in your browser with the details filled in and copies the end of the log: paste it (Ctrl+V) where the report says, then press "Create". Your user name, window titles and IP address are removed first. You need a free GitHub account.</p>
       <textarea id="report-text" rows="4" placeholder="What did you do, what happened, and roughly what time?"></textarea>
       <div class="row"><span id="report-status"></span><button id="report-send" class="primary">Report on GitHub</button></div>
       <details class="dev">

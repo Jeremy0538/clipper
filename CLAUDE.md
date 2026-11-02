@@ -64,19 +64,19 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `src-tauri/src/lib.rs` | App state, all `#[tauri::command]`s, tray, OBS event follower (`watch_events`), startup |
 | `obs/mod.rs` | `ObsManager`: writes config, spawns OBS, connects, scene setup with retry, supervisor restart, `shutdown()`, Windows job object (OBS dies with Clipper), removes OBS's tray icon |
 | `obs/config.rs` | Writes OBS user.ini/global.ini, profile basic.ini (encoder, tracks, replay buffer), websocket config (port 4466, random password in `<data>/obs-ws-password`) |
-| `obs/setup.rs` | Builds inputs/scene over websocket each start: Game Capture/Window Capture, Game Audio, Discord, Mic (+RNNoise, gain, limiter), apps. On Linux: looping test files instead |
+| `obs/setup.rs` | Builds inputs/scene over websocket each start: Game Capture/Window Capture, Game Audio, Discord, Mic (+RNNoise, gain, limiter, mono), apps. On Linux: looping test files instead. Mono is a source flag the websocket can't set: `obs/config.rs` installs a Lua script (`clipper-mono.lua`) that reads `clipper_mono` from the Mic's settings |
 | `obs/download.rs` | First-run download of pinned portable OBS (sha256-checked) into `<data>/obs` |
 | `obs/ws.rs` | Minimal obs-websocket v5 client |
 | `games.rs` | Steam library scan + Minecraft + user-added apps; picks the game window → OBS window string |
 | `autobuffer.rs` | 2 s tick: starts/stops the replay buffer when a game starts/stops |
-| `hotkey.rs` | Low-level keyboard hook that only listens (key still reaches the game). Slots: Clip (only armed while clipping), Record, Screenshot. Defaults F8/F9/F10 |
+| `hotkey.rs` | Two listeners that never block the key: a low-level keyboard hook and raw input (WM_INPUT); the first to see a press fires, the log says which (`hook`/`raw`). Slots: Clip (only armed while clipping), Record, Screenshot. Defaults F8/F9/F10 |
 | `modes.rs`, `screen.rs` | Recording + screen mode (monitor capture, canvas resize, back to the game scene) |
-| `clips.rs` | Library: per-game folders in `Videos\Clipper`, rename, favorites, storage limit |
+| `clips.rs` | Library: per-game folders in `Videos\Clipper` or a folder the user picked (`settings.clips_dir`; OBS then writes into `<clips>/.incoming`), move to another folder, rename, favorites, storage limit |
 | `editor.rs`, `tools.rs` | Trim/volumes/export/combine/"Fit for Discord" via ffmpeg (pinned download into `<data>/ffmpeg`) |
 | `gpu.rs` | DXGI vendor → OBS + ffmpeg encoder (NVENC/AMF/QSV/x264), CPU fallback |
 | `updater.rs`, `installer.rs`, `autostart.rs` | GitHub-release updater, self-install to `%LOCALAPPDATA%\Programs\Clipper` + uninstall, HKCU Run |
 | `settings.rs` | `settings.json` (serde defaults, so new fields are safe) |
-| `report.rs` | "Report a problem" → Todoist API v1 with the user's own token (`<data>/todoist-token`, never in the repo) |
+| `report.rs` | "Report a problem" → Todoist API v1 with the user's own token (`<data>/todoist-token`, never in the repo); otherwise a short pre-filled GitHub issue URL (Windows cuts long URLs) with the redacted log on the clipboard |
 | `ui/main.js` | Clips, Settings, status. `ui/editor.js` editor. `ui/setup.js` first-start setup guide (shown while `setup_done` is false), ending with a 10 s test clip |
 
 Logo: `src-tauri/icons/logo.svg` (32 px and up), `logo-16.svg` (16/24 px: play only), `tray-recording.svg`;

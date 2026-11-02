@@ -246,3 +246,6 @@ h1 { display:flex; align-items:center; gap:8px; }
 h1 .brand { width:24px; height:24px; display:block; }
 details.dev { margin-top:10px; color:var(--dim); }
 details.dev summary { cursor:pointer; font-size:13px; }
+
+/* Clips folder path in Settings and the setup guide */
+code.path { flex:1; font-size:12px; word-break:break-all; text-align:right; opacity:.85; }

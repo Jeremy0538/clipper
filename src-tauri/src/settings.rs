@@ -39,6 +39,8 @@ pub struct UserSettings {
     pub quality: String,
     /// The first-start setup guide was finished (or skipped).
     pub setup_done: bool,
+    /// Clips folder chosen by the user ("" = Videos\Clipper).
+    pub clips_dir: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -68,6 +70,9 @@ pub struct AudioSettings {
     pub mic_noise_suppression: bool,
     /// Extra gain on the microphone in dB (0..=30), before a limiter.
     pub mic_boost_db: f64,
+    /// Mix the microphone down to mono: for mics that only come out on the
+    /// left (or right) side of a clip.
+    pub mic_mono: bool,
     /// Up to two extra apps recorded on their own tracks (5 and 6).
     pub apps: Vec<AppRef>,
     /// Volume per entry in `apps` (1.0 = as played).
@@ -87,6 +92,7 @@ impl Default for AudioSettings {
             mic_volume: 1.0,
             mic_noise_suppression: true,
             mic_boost_db: 0.0,
+            mic_mono: false,
             apps: vec![],
             app_volumes: vec![],
         }
@@ -95,7 +101,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: false, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false }
+        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: false, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false, clips_dir: String::new() }
     }
 }
 
