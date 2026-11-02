@@ -127,6 +127,16 @@ fn plain(p: &str) -> String {
     }
 }
 
+/// One spelling per file for comparing clip paths: the real location (through
+/// junctions/links), plain form, and on Windows case-insensitive. Starred clips
+/// are stored and looked up by this key, so a clips folder behind a junction or
+/// a differently cased path still finds them. Falls back to the plain path for
+/// a file that no longer exists.
+pub fn fav_key(p: &str) -> String {
+    let k = fs::canonicalize(p).map(|c| plain(&c.to_string_lossy())).unwrap_or_else(|_| plain(p));
+    if cfg!(windows) { k.to_lowercase() } else { k }
+}
+
 /// A clip path from the UI, only if it really is a file inside the clips folder.
 pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
     let dir = fs::canonicalize(clips_dir).map_err(|e| e.to_string())?;
@@ -215,26 +225,32 @@ impl Favorites {
     }
     pub fn load(&self) -> Vec<String> {
         let v: Vec<String> = fs::read_to_string(&self.0).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        // Stars saved by 0.2.3-0.3.4 have the "\\\\?\\" form and never matched.
-        v.iter().map(|p| plain(p)).collect()
+        // Keys (see fav_key); older files hold paths in other spellings.
+        v.iter().map(|p| fav_key(p)).collect()
     }
     fn save(&self, v: &[String]) {
         let _ = fs::write(&self.0, serde_json::to_string(v).unwrap_or_default());
     }
     pub fn set(&self, path: &str, on: bool) {
+        let key = fav_key(path);
         let mut v = self.load();
-        v.retain(|p| p != path);
+        v.retain(|p| *p != key);
         if on {
-            v.push(path.to_string());
+            v.push(key);
         }
         self.save(&v);
     }
-    pub fn moved(&self, from: &str, to: &str) {
+    /// After a rename: `from_key` is fav_key of the old path, taken before the rename.
+    pub fn moved(&self, from_key: &str, to: &str) {
         let mut v = self.load();
-        if let Some(p) = v.iter_mut().find(|p| *p == from) {
-            *p = to.to_string();
+        if let Some(p) = v.iter_mut().find(|p| *p == from_key) {
+            *p = fav_key(to);
             self.save(&v);
         }
+    }
+    /// Is this clip (path as listed) starred? `favs` comes from load().
+    pub fn has(favs: &[String], path: &str) -> bool {
+        favs.contains(&fav_key(path))
     }
 }
 
@@ -253,7 +269,7 @@ pub fn enforce_limit(clips_dir: &Path, limit_gb: f64, favorites: &[String]) -> u
         if total <= limit {
             break;
         }
-        if favorites.contains(&c.path) {
+        if Favorites::has(favorites, &c.path) {
             continue;
         }
         if fs::remove_file(&c.path).is_ok() {
@@ -273,5 +289,29 @@ mod plain_tests {
         assert_eq!(super::plain(r"C:\x.mp4"), r"C:\x.mp4");
         assert_eq!(super::plain(r"\\?\UNC\server\x.mp4"), r"\\?\UNC\server\x.mp4");
         assert_eq!(super::plain("/home/a/x.mp4"), "/home/a/x.mp4");
+    }
+}
+
+#[cfg(test)]
+mod fav_tests {
+    #[cfg(unix)]
+    #[test]
+    fn star_found_through_a_link() {
+        let base = std::env::temp_dir().join(format!("clipper-fav-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.mp4"), b"x").unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let favs = super::Favorites::new(&base);
+        // Starred through the real path (what checked() returns)...
+        favs.set(&real.join("a.mp4").to_string_lossy(), true);
+        // ...found through the link path (what the clip list shows).
+        let loaded = favs.load();
+        assert!(super::Favorites::has(&loaded, &link.join("a.mp4").to_string_lossy()));
+        // And the storage limit keeps it.
+        assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 0);
+        assert!(real.join("a.mp4").exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

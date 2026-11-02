@@ -1,7 +1,7 @@
 // Clip editor: trim (timeline handles, I/O), per-track volume preview via
 // WebAudio (tracks decoded from bytes the app hands over, so gain > 100% works),
 // export through the app (ffmpeg). Loaded after main.js and uses its helpers.
-const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false };
+const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false, opening: 0 };
 const edv = $("ed-video");
 // While dragging, show the nearest keyframe image instantly and only seek the
 // real video when the mouse is released (seeking a big clip is slow).
@@ -46,6 +46,10 @@ function showView(name) {
 }
 
 async function openEditor(c) {
+  // Each open gets a number; an older open that is still loading stops as soon
+  // as it sees a newer one, so tracks of two clips never get mixed.
+  const gen = ++ed.opening;
+  const stale = () => gen !== ed.opening;
   showView("editor");
   $("ed-title").textContent = c.name;
   $("ed-status").textContent = "Opening…";
@@ -53,18 +57,24 @@ async function openEditor(c) {
   $("ed-export").disabled = true;
   try {
     const info = await invoke("editor_open", { path: c.path });
+    if (stale()) return;
+    stopAudio();
     ed.info = info; ed.start = 0; ed.end = info.duration;
     $("ed-scrub").classList.remove("on");
     edv.src = convertFileSrc(info.path);
     ed.ctx = ed.ctx || new AudioContext();
     ed.tracks = [];
+    const tracks = [];
     for (const s of info.sources) {
-      const bytes = await invoke("editor_track", { index: s.index });
+      const bytes = await invoke("editor_track", { path: info.path, index: s.index });
+      if (stale()) return;
       const buf = await ed.ctx.decodeAudioData(bytes);
+      if (stale()) return;
       const gain = ed.ctx.createGain();
       gain.connect(ed.ctx.destination);
-      ed.tracks.push({ s, buf, gain, node: null });
+      tracks.push({ s, buf, gain, node: null });
     }
+    ed.tracks = tracks;
     renderTracks();
     renderTimeline();
     const forPath = info.path;
@@ -76,7 +86,10 @@ async function openEditor(c) {
     uiLog(`editor ready: ${ed.tracks.length} tracks decoded (${ed.tracks.map((t) => `${t.s.name} ${t.buf.duration.toFixed(1)}s`).join(", ")})`);
     $("ed-status").textContent = "";
     $("ed-export").disabled = false;
-  } catch (err) { $("ed-status").textContent = String(err); uiLog("editor open failed: " + err); }
+  } catch (err) {
+    if (stale()) return;   // a newer clip took over; its own open reports its errors
+    $("ed-status").textContent = String(err); uiLog("editor open failed: " + err);
+  }
 }
 
 function renderTracks() {
@@ -194,6 +207,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 async function closeEditor() {
+  ed.opening++;   // a clip that is still loading stops
   edv.pause(); stopAudio();
   edv.removeAttribute("src"); edv.load();
   ed.info = null; ed.tracks = [];

@@ -212,9 +212,10 @@ fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) ->
     if name.trim().is_empty() {
         return Err("Give the clip a name".into());
     }
+    let old_key = clips::fav_key(&p.to_string_lossy());
     let new = clips::rename(&p, &name)?;
     let favs = clips::Favorites::new(&state.obs.data_dir);
-    favs.moved(&p.to_string_lossy(), &new.to_string_lossy());
+    favs.moved(&old_key, &new.to_string_lossy());
     clog!("renamed {} → {}", p.display(), new.display());
     Ok(new.to_string_lossy().into_owned())
 }
@@ -821,10 +822,14 @@ async fn editor_thumbs(app: AppHandle) -> Result<Vec<(f64, String)>, String> {
 
 /// One extracted audio track as raw bytes (decoded by WebAudio in the editor).
 #[tauri::command]
-async fn editor_track(state: tauri::State<'_, AppState>, index: usize) -> Result<tauri::ipc::Response, String> {
+async fn editor_track(state: tauri::State<'_, AppState>, path: String, index: usize) -> Result<tauri::ipc::Response, String> {
     let file = {
         let ed = state.editor.lock().await;
         let info = ed.as_ref().ok_or("No clip is open in the editor")?;
+        // Another clip was opened meanwhile: its track must not end up in this one.
+        if info.path != path {
+            return Err("The editor has a different clip open".into());
+        }
         info.sources.iter().find(|t| t.index == index).ok_or("No such track")?.file.clone()
     };
     let bytes = tokio::fs::read(&file).await.map_err(|e| e.to_string())?;
@@ -865,7 +870,7 @@ fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
     let favs = clips::Favorites::new(&state.obs.data_dir).load();
     let mut v = clips::list(&state.clips_dir);
     for c in &mut v {
-        c.favorite = favs.contains(&c.path);
+        c.favorite = clips::Favorites::has(&favs, &c.path);
     }
     v
 }
