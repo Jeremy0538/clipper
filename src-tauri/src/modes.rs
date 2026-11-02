@@ -61,6 +61,8 @@ pub async fn leave_screen(app: &AppHandle) -> Result<(), String> {
     if let Err(e) = st.obs.apply_audio().await {
         clog!("refit game scene: {e:#}");
     }
+    // apply_audio resets the capture windows: let the game detector retarget them.
+    st.obs_session.fetch_add(1, Ordering::SeqCst);
     screen::use_scene(obs, SCENE).await.map_err(|e| format!("{e:#}"))?;
     st.screen.store(false, Ordering::SeqCst);
     clog!("game mode");

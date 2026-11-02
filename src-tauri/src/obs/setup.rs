@@ -102,6 +102,18 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
         fit: true,
         volume: 1.0,
         filters: vec![],
+    }, InputSpec {
+        // Added apps (Discord, Chrome…): Game Capture can't hook them. WGC
+        // (method 2) also captures windows that are covered. The game detector
+        // enables either this or Game Capture and points it at the window.
+        name: WINDOW_CAPTURE,
+        kind: "window_capture",
+        settings: json!({ "method": 2, "window": "", "priority": 2, "cursor": true,
+                          "client_area": true, "capture_audio": false }),
+        tracks: &[],
+        fit: true,
+        volume: 1.0,
+        filters: vec![],
     }];
     match a.game_mode {
         GameAudioMode::Game => v.push(InputSpec {

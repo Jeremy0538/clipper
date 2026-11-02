@@ -123,5 +123,5 @@ stream tag `name`.
 - The owner saw "OBS running without Clipper" at least once. It's unclear whether that was the OBS
   tray icon or a real leftover process after Quit. Ask, and check the log.
 - Unconfirmed from 0.2.x: screen recording (main/all screens), recording an added app, combine clips.
-- The owner saw a Clipper error about Discord not loading (exact text unknown). Ask for a
-  "Report a problem" report when it happens again.
+- "Could not target Discord" (code 600, no `Window Capture`): the Window Capture input was never
+  created since 0.2.2, so added apps never recorded. Fixed in 0.3.2, needs a Windows test.
