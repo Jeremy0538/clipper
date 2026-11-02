@@ -711,5 +711,25 @@ listen("status", (e) => { status = e.payload; render(); });
 listen("clip-saved", (e) => { say("Saved: " + e.payload); loadClips(); });
 listen("error", (e) => say(e.payload));
 
-loadSettings().then(() => invoke("get_status")).then((s) => { status = s; render(); });
+// ---------- what's new after an update ----------
+function inline(t) {
+  const span = document.createElement("span");
+  t.split("**").forEach((part, i) => span.append(i % 2 ? Object.assign(document.createElement("b"), { textContent: part }) : part));
+  return span;
+}
+async function showWhatsNew() {
+  const entries = await invoke("whats_new").catch(() => []);
+  if (!entries.length) return;
+  $("whatsnew-list").replaceChildren(...entries.flatMap((e) => {
+    const h = document.createElement("h3");
+    h.textContent = "Version " + e.version;
+    const ul = document.createElement("ul");
+    ul.append(...e.items.map((t) => { const li = document.createElement("li"); li.append(inline(t)); return li; }));
+    return [h, ul];
+  }));
+  $("whatsnew").classList.remove("hidden");
+}
+$("whatsnew-close").onclick = () => $("whatsnew").classList.add("hidden");
+
+loadSettings().then(() => invoke("get_status")).then((s) => { status = s; render(); }).then(showWhatsNew);
 loadClips();

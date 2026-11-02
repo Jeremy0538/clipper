@@ -48,9 +48,14 @@ scripts/release.sh 0.3.1 "What changed, in plain English for the tester"   # bui
   `src-tauri/target/x86_64-pc-windows-msvc/release/clipper.exe`, commits "Release X.Y.Z", moves
   branch `test` to HEAD, pushes `main` and `test`, then runs
   `gh release create vX.Y.Z clipper.exe --prerelease`. Add `--stable` to make it the latest release.
+- **What's new:** every user-facing change gets a short line in `CHANGELOG.md` under `## X.Y.Z`
+  (written for players, in English) in the same commit. The exe embeds it and shows the entries
+  since the last seen version after an update (`changelog.rs`, `whats_new`); a unit test fails
+  when the current version has no entry.
 - **Stable vs test builds:** new installs have "Include test builds" off (since 0.4.0) and only get
   GitHub's *latest* (non-pre-)release; the owner has it on. Ship a test build first, and once the owner
-  has tested it, promote it: `gh release edit vX.Y.Z --prerelease=false --latest`.
+  has tested it, promote it: `scripts/promote.sh X.Y.Z` (marks it latest and sets the release notes
+  to the CHANGELOG entries since the previous stable release).
 - The updater accepts any release tagged `vX.Y.Z` that is newer than the running version and has
   an asset named exactly `clipper.exe`. It checks the sha256 digest from the GitHub API.
 - No NSIS/MSI: the exe installs itself (`installer.rs`).

@@ -12,6 +12,7 @@ mod modes;
 mod screen;
 mod notify;
 mod report;
+mod changelog;
 mod obs;
 mod settings;
 mod updater;
@@ -331,6 +332,23 @@ struct SettingsView {
     /// Which chip encodes, e.g. "NVIDIA (NVENC)".
     encoder: String,
     gpu_encoding: bool,
+}
+
+/// "What's new" since the version the user saw last (empty on a fresh install
+/// or when nothing changed). Marks the current version as seen.
+#[tauri::command]
+async fn whats_new(state: tauri::State<'_, AppState>) -> Result<Vec<changelog::Entry>, String> {
+    let current = env!("CARGO_PKG_VERSION");
+    let mut u = state.user.lock().await;
+    if u.last_version == current {
+        return Ok(vec![]);
+    }
+    // A fresh install gets the setup guide, not a list of changes.
+    let entries = if u.setup_done { changelog::since(&u.last_version, current) } else { vec![] };
+    clog!("what's new: {} → {current}, {} version(s) shown", if u.last_version.is_empty() { "?" } else { &u.last_version }, entries.len());
+    u.last_version = current.to_string();
+    u.save(&state.settings_file).map_err(|e| e.to_string())?;
+    Ok(entries)
 }
 
 /// The setup guide is done (or skipped): don't show it on the next start.
@@ -1121,7 +1139,7 @@ pub fn run() {
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
-            set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir
+            set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir, whats_new
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
