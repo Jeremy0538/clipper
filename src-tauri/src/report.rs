@@ -199,7 +199,9 @@ pub fn github_issue(text: &str, summary: &str) -> (String, String) {
     let title = url_encode(&format!("{}: {}", env!("CARGO_PKG_VERSION"), if first.is_empty() { "problem report" } else { &first }));
     let summary = redact(summary);
     let paste = "**End of clipper.log**\nClipper copied it to your clipboard: click on this line and press Ctrl+V.\n";
-    let (mut text_len, mut summary_len) = (text.chars().count(), summary.chars().count());
+    // Never more than fits anyway (each char is at least 3 URL bytes when
+    // encoded, often more), then shorten in big steps.
+    let (mut text_len, mut summary_len) = (text.chars().count().min(URL_MAX / 2), summary.chars().count().min(URL_MAX / 2));
     let url = loop {
         let cut = |s: &str, n: usize| -> String {
             if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
@@ -210,7 +212,7 @@ pub fn github_issue(text: &str, summary: &str) -> (String, String) {
             break url;
         }
         // Shorten the status first, then the description.
-        if summary_len > 0 { summary_len = summary_len.saturating_sub(100) } else { text_len = text_len.saturating_sub(50) }
+        if summary_len > 0 { summary_len = (summary_len * 4 / 5).saturating_sub(20) } else { text_len = (text_len * 4 / 5).saturating_sub(10) }
     };
     let log = crate::log::path().and_then(|p| tail(p, LOG_MAX)).map(|t| redact(&t)).unwrap_or_else(|| "(clipper.log could not be read)".into());
     let clip = format!("```\n{}\n```\n(names, paths and window titles removed)\n", log.trim_end());

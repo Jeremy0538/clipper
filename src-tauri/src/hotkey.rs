@@ -115,11 +115,29 @@ pub fn apply(slot: Slot, h: &Hotkey) -> Result<(), String> {
     Ok(())
 }
 
-/// A press seen by the hook and by raw input is one press: the first path to
-/// see it fires, the other is ignored when it comes within this time (raw
-/// input can lag behind the hook while a game keeps the CPU busy).
+/// Which listener acts on key presses. Only one at a time, so a press can
+/// never fire twice: raw input normally; the hook when raw input evidently
+/// receives nothing (see `choose_listener`).
+const RAW: u8 = 0;
 #[cfg_attr(not(windows), allow(dead_code))]
-const SAME_PRESS_MS: u64 = 750;
+const HOOK: u8 = 1;
+#[cfg_attr(not(windows), allow(dead_code))]
+static ACTIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(RAW);
+
+/// Every few seconds, from what each listener saw in that time (key-downs of
+/// any key): raw input that saw keys is working; the hook seeing keys while
+/// raw input sees none means raw input is broken on this PC.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn choose_listener(active: u8, hook_seen: u64, raw_seen: u64) -> u8 {
+    if raw_seen > 0 {
+        RAW
+    } else if hook_seen >= 5 {
+        HOOK
+    } else {
+        active
+    }
+}
+
 /// Auto-repeat sends key-downs at least this often while a key is held
 /// (Windows' longest repeat delay is 1 s). A key-down after a longer silence
 /// is a new press, even if its key-up was never seen (Ctrl+Alt+Del, Win+L).
@@ -160,12 +178,10 @@ impl Held {
     }
 }
 
-/// Both listeners call this on a new press (not auto-repeat) with the
+/// The active listener calls this on a new press (not auto-repeat) with the
 /// modifiers held at that moment (bit 0 shift, 1 ctrl, 2 alt).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn key_down(vk: u32, mods: u32, via: &'static str, now: u64) -> Option<Slot> {
-    use std::sync::atomic::AtomicU64;
-    static LAST: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
     // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with F8 and
     // Shift+F8 on two slots only one of them fires.
     let slot = [Slot::Clip, Slot::Record, Slot::Screenshot].into_iter().find(|s| {
@@ -174,25 +190,18 @@ fn key_down(vk: u32, mods: u32, via: &'static str, now: u64) -> Option<Slot> {
     if slot == Slot::Clip && !ARMED.load(Ordering::SeqCst) {
         return None;
     }
-    // Claim the press in one atomic step: the hook and raw-input threads can
-    // get here at the same instant.
-    let claimed = LAST[slot as usize].try_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
-        (prev == 0 || now.saturating_sub(prev) >= SAME_PRESS_MS).then_some(now)
-    });
-    if claimed.is_err() {
-        return None;
-    }
     crate::clog!("{slot:?} key pressed ({via})");
     Some(slot)
 }
 
-/// Two independent listeners, because either can miss a press on some PCs:
+/// Two listeners that never block the key (it always reaches the game):
+/// - raw input (WM_INPUT to a hidden window): posted, never skipped. Used
+///   normally.
 /// - a low-level keyboard hook. Windows skips (and after a while silently
 ///   removes) a hook that doesn't answer fast enough, which happens when a
-///   game keeps the CPU busy: a short tap was then lost, and only holding the
-///   key (auto-repeat) got through.
-/// - raw input (WM_INPUT to a hidden window): posted, never skipped.
-/// Neither blocks the key; it always reaches the game.
+///   game keeps the CPU busy: short taps got lost. Only used when raw input
+///   receives nothing on this PC.
+/// Only one acts at a time (`ACTIVE`), so one press is one action.
 #[cfg(windows)]
 pub fn start(app: tauri::AppHandle) {
     use std::sync::{mpsc, OnceLock};
@@ -233,8 +242,11 @@ pub fn start(app: tauri::AppHandle) {
     }
 
     // ---- low-level hook ----
-    static HOOK: Held = Held::new();
-    static RAW: Held = Held::new();
+    static HOOK_HELD: Held = Held::new();
+    static RAW_HELD: Held = Held::new();
+    // Key-downs (any key) each listener saw since the last check.
+    static HOOK_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static RAW_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     // Modifiers as Windows sees them now (for raw input that is right after
     // the key, so a held Shift/Ctrl/Alt is included and can never get stuck).
@@ -246,16 +258,18 @@ pub fn start(app: tauri::AppHandle) {
     unsafe extern "system" fn hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if code == HC_ACTION as i32 {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
+            if is_down(wp.0 as u32) == Some(true) {
+                HOOK_SEEN.fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(i) = VK.iter().position(|v| v.load(Ordering::SeqCst) == k.vkCode) {
                 match is_down(wp.0 as u32) {
                     // Auto-repeat sends more key-downs: only a new press counts.
                     Some(true) => {
-                        let now = now_ms();
-                        if HOOK.key_down(i, now) {
-                            send(key_down(k.vkCode, mods(), "hook", now));
+                        if HOOK_HELD.key_down(i, now_ms()) && ACTIVE.load(Ordering::SeqCst) == HOOK {
+                            send(key_down(k.vkCode, mods(), "hook"));
                         }
                     }
-                    Some(false) => HOOK.key_up(i),
+                    Some(false) => HOOK_HELD.key_up(i),
                     None => {}
                 }
             }
@@ -286,6 +300,13 @@ pub fn start(app: tauri::AppHandle) {
 
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         if msg == WM_TIMER && wp.0 == CHECK_TIMER {
+            let (h, r) = (HOOK_SEEN.swap(0, Ordering::Relaxed), RAW_SEEN.swap(0, Ordering::Relaxed));
+            let was = ACTIVE.load(Ordering::SeqCst);
+            let now = choose_listener(was, h, r);
+            if now != was {
+                ACTIVE.store(now, Ordering::SeqCst);
+                crate::clog!("{}", if now == HOOK { "raw keyboard input receives no keys: using the keyboard hook" } else { "raw keyboard input works again: using it" });
+            }
             if !still_ours(hwnd) {
                 match register(hwnd) {
                     Ok(()) => crate::clog!("raw keyboard input was taken over; registered again"),
@@ -302,12 +323,14 @@ pub fn start(app: tauri::AppHandle) {
             if got != u32::MAX && got > 0 && raw.header.dwType == RIM_TYPEKEYBOARD.0 {
                 let kb = raw.data.keyboard;
                 let vk = kb.VKey as u32;
+                if is_down(kb.Message) == Some(true) {
+                    RAW_SEEN.fetch_add(1, Ordering::Relaxed);
+                }
                 if let (Some(down), Some(i)) = (is_down(kb.Message), VK.iter().position(|v| v.load(Ordering::SeqCst) == vk)) {
-                    let now = now_ms();
                     if !down {
-                        RAW.key_up(i);
-                    } else if RAW.key_down(i, now) {
-                        send(key_down(vk, mods(), "raw", now));
+                        RAW_HELD.key_up(i);
+                    } else if RAW_HELD.key_down(i, now_ms()) && ACTIVE.load(Ordering::SeqCst) == RAW {
+                        send(key_down(vk, mods(), "raw"));
                     }
                 }
             }
@@ -342,7 +365,7 @@ pub fn start(app: tauri::AppHandle) {
             let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("ClipperRawKeys"), w!(""), WINDOW_STYLE(0),
                 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(inst), None)?;
             register(hwnd)?;
-            SetTimer(Some(hwnd), CHECK_TIMER, 10_000, None);
+            SetTimer(Some(hwnd), CHECK_TIMER, 5_000, None);
             Ok(())
         })();
         match r {
@@ -353,7 +376,10 @@ pub fn start(app: tauri::AppHandle) {
                     DispatchMessageW(&msg);
                 }
             }
-            Err(e) => crate::clog!("ERROR raw keyboard input failed: {e}"),
+            Err(e) => {
+                ACTIVE.store(HOOK, Ordering::SeqCst);
+                crate::clog!("ERROR raw keyboard input failed: {e}; using the keyboard hook");
+            }
         }
     });
     std::thread::spawn(move || {
@@ -404,12 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn one_press_from_two_listeners() {
+    fn key_matching() {
         apply(Slot::Screenshot, &Hotkey { code: "F7".into(), shift: false, ctrl: false, alt: false }).unwrap();
-        assert_eq!(key_down(0x76, 1, "test", 1000), None, "Shift+F7 is not F7");
-        assert_eq!(key_down(0x76, 0, "hook", 1000), Some(Slot::Screenshot));
-        assert_eq!(key_down(0x76, 0, "raw", 1600), None, "same press, raw input lagging");
-        assert_eq!(key_down(0x76, 0, "hook", 2000), Some(Slot::Screenshot), "next press");
+        assert_eq!(key_down(0x76, 1, "test"), None, "Shift+F7 is not F7");
+        assert_eq!(key_down(0x76, 0, "test"), Some(Slot::Screenshot));
+    }
+
+    #[test]
+    fn listener_choice() {
+        assert_eq!(choose_listener(RAW, 30, 30), RAW, "both work: raw");
+        assert_eq!(choose_listener(RAW, 30, 0), HOOK, "raw gets nothing: hook");
+        assert_eq!(choose_listener(HOOK, 30, 2), RAW, "raw is back");
+        assert_eq!(choose_listener(RAW, 2, 0), RAW, "too few keys to tell");
+        assert_eq!(choose_listener(HOOK, 0, 0), HOOK, "idle: keep");
     }
 
     #[test]

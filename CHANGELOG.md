@@ -5,7 +5,7 @@ stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
 ## 0.4.5
-- Clips left behind in an earlier clips folder can be moved later: Settings → Recording → **Move them now**.
+- Clips in an earlier clips folder (not moved, or saved while your drive was unplugged) keep showing in Clipper.
 - More reliable: one key press never triggers an action twice, and a damaged OBS file no longer stops recording.
 
 ## 0.4.4

@@ -74,9 +74,9 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `obs/ws.rs` | Minimal obs-websocket v5 client |
 | `games.rs` | Steam library scan + Minecraft + user-added apps; picks the game window → OBS window string |
 | `autobuffer.rs` | 2 s tick: starts/stops the replay buffer when a game starts/stops |
-| `hotkey.rs` | Two listeners that never block the key: a low-level keyboard hook and raw input (WM_INPUT); the first to see a press fires, the log says which (`hook`/`raw`). Slots: Clip (only armed while clipping), Record, Screenshot. Defaults F8/F9/F10 |
+| `hotkey.rs` | Two listeners that never block the key: raw input (WM_INPUT, normally active) and a low-level keyboard hook (takes over only when raw input receives no keys; checked every 5 s). Only one acts at a time, so no dedup is needed; the log says which (`hook`/`raw`). Slots: Clip (only armed while clipping), Record, Screenshot. Defaults F8/F9/F10 |
 | `modes.rs`, `screen.rs` | Recording + screen mode (monitor capture, canvas resize, back to the game scene) |
-| `clips.rs` | Library: per-game folders in `Videos\Clipper` or a folder the user picked (`settings.clips_dir`; OBS then writes into `<clips>/.incoming`), move to another folder, rename, favorites, storage limit |
+| `clips.rs` | Library: per-game folders in `Videos\Clipper` or a folder the user picked (`settings.clips_dir`; OBS then writes into `<clips>/.incoming`). Only folders with the `.clipper-clips` marker are sorted, size-limited or moved out of; the library also lists earlier Clipper folders (`old_clips_dirs`, Videos\Clipper), rename, favorites, storage limit |
 | `editor.rs`, `tools.rs` | Trim/volumes/export/combine/"Fit for Discord" via ffmpeg (pinned download into `<data>/ffmpeg`) |
 | `gpu.rs` | DXGI vendor → OBS + ffmpeg encoder (NVENC/AMF/QSV/x264), CPU fallback |
 | `updater.rs`, `installer.rs`, `autostart.rs` | GitHub-release updater, self-install to `%LOCALAPPDATA%\Programs\Clipper` + uninstall, HKCU Run |

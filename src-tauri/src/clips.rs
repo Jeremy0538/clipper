@@ -43,16 +43,26 @@ pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
     let base = format!("{name} {stamp}");
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
-    let mut dst = clips_dir.join(format!("{base}.{ext}"));
-    let mut n = 2;
-    while dst.exists() {
-        dst = clips_dir.join(format!("{base} ({n}).{ext}"));
-        n += 1;
-    }
+    let dst = free_name(clips_dir, &base, Some(ext));
     // Across drives (a buffer started before the clips folder moved) this is
     // copy + delete, without leaving half or double files.
     move_file(src, &dst)?;
     Ok(dst)
+}
+
+/// "<dir>/<base>.<ext>", or "<base> (2).<ext>", (3)… when that is taken.
+pub fn free_name(dir: &Path, base: &str, ext: Option<&str>) -> PathBuf {
+    let name = |suffix: String| match ext {
+        Some(e) => dir.join(format!("{base}{suffix}.{e}")),
+        None => dir.join(format!("{base}{suffix}")),
+    };
+    let mut dst = name(String::new());
+    let mut n = 2;
+    while dst.exists() {
+        dst = name(format!(" ({n})"));
+        n += 1;
+    }
+    dst
 }
 
 /// OBS's folder for fresh replays when the clips folder is a chosen one (same
@@ -156,17 +166,9 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
     }
     let mut one = |src: &Path, dir: &Path| {
         let _ = fs::create_dir_all(dir);
-        let Some(name) = src.file_name() else { return };
-        let mut dst = dir.join(name);
-        let (stem, ext) = (
-            src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default(),
-        );
-        let mut n = 2;
-        while dst.exists() {
-            dst = dir.join(format!("{stem} ({n}){ext}"));
-            n += 1;
-        }
+        let Some(stem) = src.file_stem() else { return };
+        let ext = src.extension().map(|e| e.to_string_lossy().into_owned());
+        let dst = free_name(dir, &stem.to_string_lossy(), ext.as_deref());
         let key = fav_key(&src.to_string_lossy());
         match move_file(src, &dst) {
             Ok(()) => {
@@ -187,7 +189,8 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
                 continue;
             }
             for f in fs::read_dir(&p).into_iter().flatten().flatten() {
-                if f.path().is_file() {
+                let skip = f.file_name() == MARKER || f.file_name() == "desktop.ini";
+                if f.path().is_file() && !skip {
                     one(&f.path(), &to.join(&name));
                 }
             }
@@ -289,6 +292,23 @@ pub fn checked(clips_dir: &Path, path: &str) -> Result<PathBuf, String> {
         return Err("Not a clip in the clips folder".into());
     }
     Ok(PathBuf::from(plain(&p.to_string_lossy())))
+}
+
+/// Like `checked`, for a clip in any of Clipper's folders.
+pub fn checked_in(dirs: &[PathBuf], path: &str) -> Result<PathBuf, String> {
+    let mut err = "Not a clip in the clips folder".to_string();
+    for d in dirs {
+        match checked(d, path) {
+            Ok(p) => return Ok(p),
+            Err(e) => err = e,
+        }
+    }
+    Err(err)
+}
+
+/// The clips of several folders together.
+pub fn list_all(dirs: &[PathBuf]) -> Vec<ClipInfo> {
+    dirs.iter().flat_map(|d| list(d)).collect()
 }
 
 pub fn trash(p: &Path) -> Result<(), String> {
@@ -411,14 +431,16 @@ impl Favorites {
     }
 }
 
-/// Storage limit: delete the oldest clips (never starred ones) until the
-/// clips folder is under `limit_gb`. Returns how many were deleted.
-pub fn enforce_limit(clips_dir: &Path, limit_gb: f64, favorites: &[String]) -> usize {
-    if limit_gb <= 0.0 || !is_ours(clips_dir) {
+/// Storage limit: delete the oldest clips (never starred ones) until
+/// Clipper's folders together are under `limit_gb`. Returns how many were deleted.
+pub fn enforce_limit(dirs: &[PathBuf], limit_gb: f64, favorites: &[String]) -> usize {
+    // Only folders that are Clipper's own: never delete someone's other videos.
+    let ours: Vec<PathBuf> = dirs.iter().filter(|d| is_ours(d)).cloned().collect();
+    if limit_gb <= 0.0 || ours.is_empty() {
         return 0;
     }
     let limit = (limit_gb * 1e9) as u64;
-    let mut all = list(clips_dir);
+    let mut all = list_all(&ours);
     let mut total: u64 = all.iter().map(|c| c.size).sum();
     all.sort_by_key(|c| c.modified); // oldest first
     let mut n = 0;
@@ -469,7 +491,7 @@ mod fav_tests {
         // And the storage limit keeps it (in a folder that is Clipper's).
         super::mark(&real).unwrap();
         std::fs::write(real.join("b.mp4"), b"y").unwrap();
-        assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 1, "the unstarred one goes");
+        assert_eq!(super::enforce_limit(&[link.clone()], 0.000_000_000_1, &loaded), 1, "the unstarred one goes");
         assert!(!real.join("b.mp4").exists());
         assert!(real.join("a.mp4").exists());
         assert_eq!(super::target_for(&base), base.join("Clipper"), "a folder with other things in it");

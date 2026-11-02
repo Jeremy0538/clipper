@@ -187,7 +187,10 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
         serde_json::to_string(&encoder_settings(s))?,
     )?;
 
-    write_mono_script(c)?;
+    // Optional (mono mic only): a failure must not keep OBS from starting.
+    if let Err(e) = write_mono_script(c) {
+        crate::clog!("ERROR could not write the OBS mono script: {e:#}");
+    }
 
     // An empty scene; inputs are (re)created over the websocket on every start.
     let collection = scenes.join(format!("{COLLECTION}.json"));
