@@ -290,6 +290,19 @@ struct SettingsView {
     version: String,
     audio: AudioSettings,
     webcam: settings::WebcamSettings,
+    setup_done: bool,
+    /// Which chip encodes, e.g. "NVIDIA (NVENC)".
+    encoder: String,
+    gpu_encoding: bool,
+}
+
+/// The setup guide is done (or skipped): don't show it on the next start.
+#[tauri::command]
+async fn finish_setup(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut u = state.user.lock().await;
+    u.setup_done = true;
+    clog!("setup guide finished");
+    u.save(&state.settings_file).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -313,6 +326,9 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
         webcam: u.webcam.clone(),
+        setup_done: u.setup_done,
+        encoder: if state.obs.settings.lock().unwrap().force_cpu { gpu::Vendor::Cpu } else { gpu::detect() }.label().into(),
+        gpu_encoding: !state.obs.settings.lock().unwrap().force_cpu && gpu::detect() != gpu::Vendor::Cpu,
     })
 }
 
@@ -884,7 +900,7 @@ pub fn run() {
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
-            screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, list_cameras, set_webcam
+            screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, list_cameras, set_webcam, finish_setup
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -154,3 +154,30 @@ html.native-frame { border:0; }
   background:var(--accent); color:var(--on-accent); font-weight:700; font-size:13px; }
 body.selecting .thumb:hover::after { content:"+"; }
 #sel-info { color:var(--fg); font-weight:600; }
+
+/* ---- setup guide ---- */
+body.in-setup nav, body.in-setup #toggle, body.in-setup #record, body.in-setup #save { visibility:hidden; }
+#view-setup { padding:18px; }
+.setup-box { max-width:640px; margin:0 auto; display:flex; flex-direction:column; gap:14px; }
+#setup-steps { display:flex; gap:6px; list-style:none; padding:0; margin:0; }
+#setup-steps li { flex:1; font-size:11.5px; color:var(--dim); padding-top:8px; border-top:3px solid var(--track); text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#setup-steps li.done { border-color:var(--accent); }
+#setup-steps li.now { border-color:var(--accent); color:var(--fg); font-weight:600; }
+.step { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 22px; }
+.step h2 { font-size:20px; margin:0 0 10px; display:flex; align-items:baseline; gap:10px; }
+.step h3 { font-size:13px; margin:18px 0 4px; border-top:1px solid var(--line); padding-top:14px; }
+.step p { line-height:1.5; }
+.callout { background:var(--bg); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:6px; padding:10px 12px; line-height:1.45; }
+.callout.warn { border-left-color:#e5b400; }
+.choices { display:flex; flex-direction:column; gap:8px; margin:6px 0 10px; }
+.choice { display:grid; grid-template-columns:22px 1fr; column-gap:8px; align-items:center; padding:10px 12px; border:1px solid var(--ctl-border); border-radius:8px; cursor:pointer; }
+.choice:has(input:checked) { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent); }
+.choice input { width:16px; height:16px; accent-color:var(--accent); margin:0; }
+.choice small { grid-column:2; color:var(--dim); font-size:12.5px; margin-top:2px; }
+.choice em { font-style:normal; font-weight:600; font-size:11px; color:var(--on-accent); background:var(--accent); border-radius:999px; padding:1px 7px; margin-left:6px; }
+.setup-nav { display:flex; align-items:center; gap:8px; }
+button.link { background:transparent; border-color:transparent; color:var(--dim); text-decoration:underline; padding-left:0; }
+.howto { line-height:1.7; padding-left:20px; }
+kbd { font:600 12px "Segoe UI", system-ui, sans-serif; border:1px solid var(--ctl-border); border-bottom-width:2px; border-radius:4px; padding:1px 6px; background:var(--ctl); }
+.keybtn.listening { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.step .row > span:first-child { flex-basis:210px; }

@@ -164,6 +164,26 @@ impl ObsManager {
         }
         report("ready".into());
 
+        // OBS needs its tray icon to start hidden, but Clipper is the only app the
+        // user should see: remove OBS's icon (again after an Explorer restart).
+        #[cfg(windows)]
+        if let Some(pid) = child.id() {
+            tokio::spawn(async move {
+                let mut logged = false;
+                for _ in 0..100_000 {
+                    let n = tokio::task::spawn_blocking(move || hide_tray_icon(pid)).await.unwrap_or(-1);
+                    if n < 0 {
+                        break; // OBS is gone
+                    }
+                    if n > 0 && !logged {
+                        crate::clog!("hid the OBS tray icon");
+                        logged = true;
+                    }
+                    tokio::time::sleep(Duration::from_secs(if logged { 15 } else { 1 })).await;
+                }
+            });
+        }
+
         let status = child.wait().await?;
         *self.pid.lock().unwrap() = None;
         if self.restarting.swap(false, Ordering::SeqCst) {
@@ -324,5 +344,54 @@ fn tie_to_clipper(pid: u32) {
             }
             Err(e) => crate::clog!("ERROR could not open OBS process: {e}"),
         }
+    }
+}
+
+/// Remove the tray icon of OBS (Qt keeps it in a message-only window of class
+/// QTrayIconMessageWindowClass, icon id 0). Returns how many were removed,
+/// or -1 once the process is gone.
+#[cfg(windows)]
+fn hide_tray_icon(pid: u32) -> i32 {
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::HWND,
+            System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            UI::{
+                Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW},
+                WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId, HWND_MESSAGE},
+            },
+        },
+    };
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => { let _ = windows::Win32::Foundation::CloseHandle(h); }
+            Err(_) => return -1,
+        }
+        let mut n = 0;
+        for parent in [Some(HWND_MESSAGE), None] {
+            let mut prev: Option<HWND> = None;
+            while let Ok(hwnd) = FindWindowExW(parent, prev, w!("QTrayIconMessageWindowClass"), None) {
+                if hwnd.is_invalid() {
+                    break;
+                }
+                prev = Some(hwnd);
+                let mut owner = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut owner));
+                if owner != pid {
+                    continue;
+                }
+                let nid = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: hwnd,
+                    uID: 0,
+                    ..Default::default()
+                };
+                if Shell_NotifyIconW(NIM_DELETE, &nid).as_bool() {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 }

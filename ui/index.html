@@ -86,6 +86,114 @@
     </div>
   </div>
 
+  <main id="view-setup" class="view hidden">
+    <div class="setup-box">
+      <ol id="setup-steps"></ol>
+
+      <section class="step" data-title="Welcome">
+        <h2>Welcome to Clipper</h2>
+        <p>Clipper keeps the last minutes of your game ready. Press one key and that moment is saved as a clip. This guide sets up keys, sound and quality in about a minute. You can change everything later in Settings.</p>
+        <div class="callout"><span id="su-obs">Getting the recorder ready…</span></div>
+        <p class="hint">The first start downloads the recording engine (about 150 MB). You can already go on.</p>
+      </section>
+
+      <section class="step" data-title="Keys">
+        <h2>Your keys</h2>
+        <p class="hint">Click a key, then press the new combination. The key still reaches your game, so pick one you don't use in-game.</p>
+        <div class="row"><span>Save clip</span><button class="keybtn" data-which="clip">…</button></div>
+        <div class="row"><span>Start/stop recording</span><button class="keybtn" data-which="record">…</button></div>
+        <div class="row"><span>Screenshot</span><button class="keybtn" data-which="screenshot">…</button></div>
+        <div class="row"><span>Clip length</span>
+          <select id="su-buffer">
+            <option value="30">30 seconds</option><option value="60">1 minute</option>
+            <option value="90">1.5 minutes</option><option value="120">2 minutes</option>
+            <option value="180">3 minutes</option><option value="300">5 minutes</option>
+          </select></div>
+        <p class="hint">How far back a clip goes. Longer uses a little more memory, not more disk space.</p>
+      </section>
+
+      <section class="step" data-title="Game sound">
+        <h2>Game sound</h2>
+        <div class="choices" id="su-game-mode">
+          <label class="choice"><input type="radio" name="su-gm" value="game"><b>Only the game <em>recommended</em></b>
+            <small>Just the game you're playing. Music, YouTube and notifications stay out of your clips.</small></label>
+          <label class="choice"><input type="radio" name="su-gm" value="desktop"><b>Everything I hear</b>
+            <small>All sound of one output device (headset or speakers). Use this if the game sound is missing.</small></label>
+          <label class="choice"><input type="radio" name="su-gm" value="off"><b>No game sound</b></label>
+        </div>
+        <div class="row hidden" id="su-row-desktop"><span>Output device</span><select id="su-desktop-device"></select></div>
+        <div class="row"><span>Record Discord</span><input type="checkbox" id="su-discord"></div>
+        <p class="hint">Discord goes on its own track, so you can turn your friends down or off in the editor later.</p>
+      </section>
+
+      <section class="step" data-title="Microphone">
+        <h2>Microphone</h2>
+        <div class="row"><span>Record my microphone</span><input type="checkbox" id="su-mic"></div>
+        <div class="su-mic-on">
+          <div class="row"><span>Device</span><select id="su-mic-device"></select></div>
+          <div class="row"><span>Level</span><div class="meter" data-inputs="Mic"><i></i></div></div>
+          <p class="hint">Talk normally. The bar should move into the yellow part. Nothing moves? Try another device, or let Clipper find it.</p>
+          <div class="row"><span></span><button id="su-find-mic">Find my microphone</button><button id="su-level-mic">Set my volume</button></div>
+          <div class="callout hidden" id="su-mic-msg"></div>
+          <div class="row"><span>Noise suppression</span><input type="checkbox" id="su-noise"></div>
+          <p class="hint">Removes keyboard and fan noise from your voice.</p>
+        </div>
+      </section>
+
+      <section class="step" data-title="Quality">
+        <h2>Quality</h2>
+        <div class="callout" id="su-encoder"></div>
+        <div class="choices" id="su-quality">
+          <label class="choice"><input type="radio" name="su-q" value="high"><b>High</b><small>Best picture. About 300 MB per minute.</small></label>
+          <label class="choice"><input type="radio" name="su-q" value="balanced"><b>Balanced <em>recommended</em></b><small>Looks the same while playing. About 140 MB per minute.</small></label>
+          <label class="choice"><input type="radio" name="su-q" value="small"><b>Small files</b><small>For a small or full drive. About 90 MB per minute.</small></label>
+        </div>
+        <div class="row"><span>Storage limit</span>
+          <select id="su-storage">
+            <option value="0">No limit</option><option value="25">25 GB</option><option value="50">50 GB</option>
+            <option value="100">100 GB</option><option value="200">200 GB</option><option value="500">500 GB</option>
+          </select></div>
+        <p class="hint">Above the limit the oldest clips are deleted. Starred clips are always kept.</p>
+      </section>
+
+      <section class="step" data-title="Extras">
+        <h2>Extras <span class="hint">all optional</span></h2>
+        <h3>Webcam</h3>
+        <div class="row"><span>Show my webcam in clips</span><input type="checkbox" id="su-cam"></div>
+        <div class="su-cam-on">
+          <div class="row"><span>Camera</span><select id="su-cam-device"></select></div>
+          <div class="row"><span>Corner</span>
+            <select id="su-cam-position">
+              <option value="top-left">Top left</option><option value="top-right">Top right</option>
+              <option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option>
+            </select></div>
+        </div>
+        <h3>Screen recording</h3>
+        <p class="hint">Without a game, Record and Start clipping capture your screen instead.</p>
+        <div class="row"><span>Screen to record</span><select id="su-screen"></select></div>
+        <h3>Other</h3>
+        <div class="row"><span>Start with Windows (in the tray)</span><input type="checkbox" id="su-autostart"></div>
+        <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="su-sound"></div>
+      </section>
+
+      <section class="step" data-title="Done">
+        <h2>You're ready</h2>
+        <ol class="howto">
+          <li>Start a game. Clipper starts clipping by itself (the status bar turns green).</li>
+          <li>Something cool happened? Press <kbd id="su-k-clip">F8</kbd>. You hear a short sound.</li>
+          <li><kbd id="su-k-rec">F9</kbd> starts or stops a full recording, <kbd id="su-k-shot">F10</kbd> takes a screenshot.</li>
+          <li>Your clips appear under Clips: trim them, change the volumes, copy them to Discord.</li>
+        </ol>
+        <p class="hint">Clipper keeps running in the tray when you close the window. Settings → Startup can run this guide again.</p>
+      </section>
+
+      <div class="setup-nav">
+        <button id="su-skip" class="link">Skip setup</button><span class="spacer"></span>
+        <button id="su-back">Back</button><button id="su-next" class="primary">Next</button>
+      </div>
+    </div>
+  </main>
+
   <main id="view-settings" class="view hidden">
     <section class="card">
       <h2>Recording</h2>
@@ -203,6 +311,7 @@
     <section class="card">
       <h2>Startup</h2>
       <div class="row"><span>Start with Windows (in the tray)</span><input type="checkbox" id="opt-autostart"></div>
+      <div class="row"><span>Setup guide</span><button id="run-setup">Run the setup guide again</button></div>
     </section>
 
     <section class="card">
@@ -212,5 +321,6 @@
   </main>
   <script src="main.js"></script>
   <script src="editor.js"></script>
+  <script src="setup.js"></script>
 </body>
 </html>

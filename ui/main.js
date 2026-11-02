@@ -215,9 +215,7 @@ let listening = false;
 
 async function loadSettings() {
   settings = await invoke("get_settings");
-  $("hotkey").textContent = settings.hotkey_label;
-  $("record-hotkey").textContent = settings.record_hotkey_label;
-  $("screenshot-hotkey").textContent = settings.screenshot_hotkey_label;
+  syncKeyLabels();
   const sl = $("storage-limit");
   if (![...sl.options].some((o) => +o.value === settings.storage_limit_gb)) sl.add(new Option(settings.storage_limit_gb + " GB", settings.storage_limit_gb));
   sl.value = String(settings.storage_limit_gb);
@@ -237,6 +235,10 @@ async function loadSettings() {
   showAudio(settings.audio);
 }
 
+function syncKeyLabels() {
+  const labels = { clip: settings.hotkey_label, record: settings.record_hotkey_label, screenshot: settings.screenshot_hotkey_label };
+  for (const b of document.querySelectorAll(".keybtn")) b.textContent = labels[b.dataset.which];
+}
 for (const b of document.querySelectorAll(".keybtn")) {
   b.onclick = () => {
     listening = b;
@@ -253,9 +255,12 @@ window.addEventListener("keydown", async (e) => {
   btn.classList.remove("listening");
   if (e.code === "Escape") return loadSettings();
   try {
-    btn.textContent = await invoke("set_hotkey", {
+    const label = await invoke("set_hotkey", {
       hotkey: { code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey }, which: btn.dataset.which,
     });
+    settings[{ clip: "hotkey_label", record: "record_hotkey_label", screenshot: "screenshot_hotkey_label" }[btn.dataset.which]] = label;
+    syncKeyLabels();
+    document.dispatchEvent(new Event("keys-changed"));
     say("Key saved.");
   } catch (err) { say(err); loadSettings(); }
 });

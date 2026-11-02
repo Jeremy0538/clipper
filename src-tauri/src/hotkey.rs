@@ -1,6 +1,6 @@
-//! The clip key (default Shift+F, user-configurable). A low-level keyboard hook
-//! only *listens*: the key still reaches the game (Shift+F is often sprint +
-//! interact). Armed only while the replay buffer runs, so the key does nothing
+//! The clip key (default F8, user-configurable). A low-level keyboard hook
+//! only *listens*: the key still reaches the game (a combo like Shift+F can be
+//! sprint + interact). Armed only while the replay buffer runs, so the key does nothing
 //! outside games.
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub struct Hotkey {
 
 impl Default for Hotkey {
     fn default() -> Self {
-        Self { code: "KeyF".into(), shift: true, ctrl: false, alt: false }
+        Self { code: "F8".into(), shift: false, ctrl: false, alt: false }
     }
 }
 
@@ -88,13 +88,13 @@ pub enum Slot {
 }
 
 impl Hotkey {
-    /// Default record key: Alt+F9 (like NVIDIA's).
+    /// Default record key: F9 (Alt+F9/F10 are NVIDIA's overlay keys).
     pub fn default_record() -> Self {
-        Self { code: "F9".into(), shift: false, ctrl: false, alt: true }
+        Self { code: "F9".into(), shift: false, ctrl: false, alt: false }
     }
-    /// Default screenshot key: Alt+F10 (F12 alone is Steam's).
+    /// Default screenshot key: F10 (F12 alone is Steam's).
     pub fn default_screenshot() -> Self {
-        Self { code: "F10".into(), shift: false, ctrl: false, alt: true }
+        Self { code: "F10".into(), shift: false, ctrl: false, alt: false }
     }
 }
 
@@ -222,8 +222,7 @@ mod tests {
     #[test]
     fn keys() {
         let h = Hotkey::default();
-        assert_eq!(h.vk(), Some(0x46));
-        assert_eq!(h.label(), "Shift+F");
+        assert_eq!((h.vk(), h.label().as_str()), (Some(0x77), "F8"));
         let f8 = Hotkey { code: "F8".into(), shift: false, ctrl: false, alt: false };
         assert_eq!((f8.vk(), f8.label().as_str()), (Some(0x77), "F8"));
         let c = Hotkey { code: "Digit3".into(), shift: false, ctrl: true, alt: true };
