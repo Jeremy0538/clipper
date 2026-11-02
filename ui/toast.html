@@ -1,32 +1,70 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
 <meta charset="utf-8">
 <title>Clipper toast</title>
 <style>
-  html, body { margin:0; background:transparent; overflow:hidden; font:13px system-ui, sans-serif; }
-  .card { box-sizing:border-box; margin:4px; height:68px; display:flex; align-items:center; gap:12px;
-          padding:0 14px; border-radius:12px; background:rgba(22,22,30,.92); color:#e6e6f0;
-          border-left:4px solid #a6e3a1; opacity:0; transform:translateX(24px); }
-  .card.bad { border-left-color:#f38ba8; }
+  /* Same colours as the app (style.css). */
+  :root, :root[data-theme="light"] {
+    color-scheme: light;
+    --card:#ffffff; --fg:#141414; --dim:#555b63; --line:#d9dde3;
+    --accent:#005fb8; --ok:#0f7b0f; --danger:#c42b1c;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444;
+    --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+  }
+  :root[data-theme="oled"] {
+    color-scheme: dark;
+    --card:#0e0e0e; --fg:#ffffff; --dim:#b0b0b0; --line:#2f2f2f;
+    --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="system"] {
+      color-scheme: dark;
+      --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444;
+      --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+    }
+  }
+  html, body { margin:0; background:transparent; overflow:hidden;
+    font:14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  .card { --edge:var(--accent); box-sizing:border-box; margin:6px; height:72px; display:flex; align-items:center; gap:12px;
+    padding:0 16px 0 14px; border-radius:10px; background:var(--card); color:var(--fg);
+    border:1px solid var(--line); border-left:4px solid var(--edge);
+    box-shadow:0 4px 14px rgba(0,0,0,.28); opacity:0; transform:translateX(24px); }
+  .card.saved { --edge:var(--ok); }
+  .card.error { --edge:var(--danger); }
   .card.show { animation:in .18s ease-out forwards, out .3s ease-in 2.2s forwards; }
   @keyframes in { to { opacity:1; transform:none; } }
   @keyframes out { from { opacity:1; transform:none; } to { opacity:0; transform:translateX(24px); } }
-  .dot { width:10px; height:10px; border-radius:50%; background:#a6e3a1; flex:none; }
-  .bad .dot { background:#f38ba8; }
-  .t { font-weight:600; font-size:14px; }
-  .d { color:#9090a8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:250px; }
+  .logo { width:34px; height:34px; flex:none; }
+  .text { min-width:0; }
+  .t { font-weight:600; font-size:14.5px; display:flex; align-items:center; gap:6px; }
+  .t i { width:8px; height:8px; border-radius:50%; background:var(--edge); flex:none; }
+  .d { color:var(--dim); font-size:13px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:250px; }
+  .d:empty { display:none; }
 </style>
 </head>
 <body>
-  <div class="card" id="card"><div class="dot"></div><div><div class="t" id="t"></div><div class="d" id="d"></div></div></div>
+  <div class="card" id="card">
+    <!-- The Clipper logo (src-tauri/icons/logo.svg). -->
+    <svg class="logo" viewBox="0 0 512 512" aria-hidden="true">
+      <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6fd6ff"/><stop offset="1" stop-color="#0a5fc4"/></linearGradient></defs>
+      <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+      <path d="M 268 112 A 144 144 0 1 1 112 256" fill="none" stroke="#fff" stroke-width="46" stroke-linecap="round"/>
+      <path d="M 178 112 L 270 54 L 270 170 Z" fill="#fff" stroke="#fff" stroke-width="20" stroke-linejoin="round"/>
+      <path d="M 222 186 L 336 256 L 222 326 Z" fill="#fff" stroke="#fff" stroke-width="24" stroke-linejoin="round"/>
+    </svg>
+    <div class="text"><div class="t"><i></i><span id="t"></span></div><div class="d" id="d"></div></div>
+  </div>
 <script>
   const card = document.getElementById("card");
   window.__TAURI__.event.listen("toast", ({ payload }) => {
+    document.documentElement.dataset.theme = payload.theme || "system";
     document.getElementById("t").textContent = payload.title;
     document.getElementById("d").textContent = payload.detail || "";
-    card.classList.toggle("bad", !payload.ok);
-    card.classList.remove("show");
+    card.className = "card " + (payload.kind || "info");
     void card.offsetWidth; // restart the animation
     card.classList.add("show");
   });

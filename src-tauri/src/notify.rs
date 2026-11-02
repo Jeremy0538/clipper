@@ -7,8 +7,8 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const TOAST: &str = "toast";
-const TOAST_W: f64 = 320.0;
-const TOAST_H: f64 = 76.0;
+const TOAST_W: f64 = 340.0;
+const TOAST_H: f64 = 84.0;
 const MARGIN: f64 = 24.0;
 const SHOW_MS: u64 = 2600;
 
@@ -54,10 +54,10 @@ pub fn info(app: &AppHandle, title: impl Into<String>, detail: impl Into<String>
 
 /// `ok` = success styling; `title` big line, `detail` small line.
 async fn show(app: &AppHandle, ok: bool, title: &str, detail: &str, with_sound: bool) {
-    let (toast_on, sound_on) = {
+    let (toast_on, sound_on, theme) = {
         let st = app.state::<crate::AppState>();
         let u = st.user.lock().await;
-        (u.toast, u.sound)
+        (u.toast, u.sound, u.theme.clone())
     };
     if sound_on && with_sound {
         chime();
@@ -65,7 +65,9 @@ async fn show(app: &AppHandle, ok: bool, title: &str, detail: &str, with_sound: 
     if !toast_on {
         return;
     }
-    let _ = app.emit_to(TOAST, "toast", json!({ "ok": ok, "title": title, "detail": detail }));
+    // saved = green edge (with chime), info = accent, error = red; same theme as the app.
+    let kind = if !ok { "error" } else if with_sound { "saved" } else { "info" };
+    let _ = app.emit_to(TOAST, "toast", json!({ "kind": kind, "title": title, "detail": detail, "theme": theme }));
 
     #[cfg(windows)]
     if let Some(w) = app.get_webview_window(TOAST) {

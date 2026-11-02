@@ -74,6 +74,10 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `report.rs` | "Report a problem" → Todoist API v1 with the user's own token (`<data>/todoist-token`, never in the repo) |
 | `ui/main.js` | Clips, Settings, status. `ui/editor.js` editor. `ui/setup.js` first-start setup guide (shown while `setup_done` is false), ending with a 10 s test clip |
 
+Logo: `src-tauri/icons/logo.svg` (32 px and up), `logo-16.svg` (16/24 px: play only), `tray-recording.svg`;
+the PNGs and icon.ico are rendered from them with rsvg-convert + magick. `ui/logo.svg` and the
+copy inline in `ui/toast.html` must stay in step. Toasts use the app's theme colours.
+
 Audio tracks: 1 Mix, 2 Game, 3 Discord, 4 Mic, 5/6 extra apps. OBS writes track names as the
 stream tag `name`.
 

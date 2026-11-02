@@ -877,6 +877,10 @@ async fn watch_events(app: AppHandle) {
                 hotkey::set_armed(active);
                 let state = ev["eventData"]["outputState"].as_str().unwrap_or("?");
                 clog!("buffer {}", state.trim_start_matches("OBS_WEBSOCKET_OUTPUT_").to_lowercase());
+                if state == "OBS_WEBSOCKET_OUTPUT_STARTED" {
+                    let key = app.state::<AppState>().user.lock().await.hotkey.label();
+                    notify::info(&app, "Clipping is on", format!("Press {key} to save a clip"));
+                }
                 if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
                     notify::info(&app, "Clipping stopped", "");
                 }
