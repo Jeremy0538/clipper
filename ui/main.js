@@ -387,7 +387,8 @@ $("logs").onclick = () => invoke("open_log_folder").catch(say);
 
 // ---------- report a problem ----------
 function reportSync() {
-  $("report-token").placeholder = settings?.report_ready ? "Token saved (paste a new one to replace it)" : "Paste your API token";
+  $("report-token").placeholder = settings?.report_ready ? "Token saved (empty + Save removes it)" : "Paste your API token";
+  $("report-send").textContent = settings?.report_ready ? "Send to Todoist" : "Report on GitHub";
 }
 $("report-token-save").onclick = async () => {
   const btn = $("report-token-save");
@@ -404,14 +405,18 @@ $("report-token-save").onclick = async () => {
 $("report-send").onclick = async () => {
   const text = $("report-text").value.trim();
   if (!text) return say("Describe the problem first.");
-  if (!settings.report_ready) return say("Paste your Todoist token below first.");
   const btn = $("report-send");
   btn.disabled = true;
-  $("report-status").textContent = "Sending…";
   try {
-    await invoke("report_problem", { text });
+    if (settings.report_ready) {
+      $("report-status").textContent = "Sending…";
+      await invoke("report_problem", { text });
+      $("report-status").textContent = "Sent to your Todoist Inbox, with the logs.";
+    } else {
+      await invoke("report_github", { text });
+      $("report-status").textContent = "Opened in your browser: check it and press Create.";
+    }
     $("report-text").value = "";
-    $("report-status").textContent = "Sent to your Todoist Inbox, with the logs.";
   } catch (err) { $("report-status").textContent = "Not sent: " + err; }
   btn.disabled = false;
 };

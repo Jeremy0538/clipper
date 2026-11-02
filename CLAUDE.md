@@ -14,9 +14,11 @@ UI text and commit messages in English.
 - Loop: change code → check that it compiles for Windows → bump the version and publish a
   pre-release → the owner updates in the app and tests → the owner reports back with symptoms and
   the log.
-- **Bug reports come with logs:** Settings → Troubleshooting → "Report a problem" creates a task in
-  the owner's Todoist Inbox (title `Clipper X.Y.Z: …`, status/settings summary in the description, the
-  end of clipper.log and of the newest OBS log as comments). Read those comments first.
+- **Bug reports come with logs:** Settings → Troubleshooting → "Report a problem". The owner has a
+  Todoist token set, so their reports become a task in their Todoist Inbox (title `Clipper X.Y.Z: …`,
+  status/settings summary in the description, the end of clipper.log and of the newest OBS log as
+  comments). Read those comments first. Everyone else gets a pre-filled **GitHub issue** (redacted:
+  user name, window titles, IPs; `report::redact`), so also check `gh issue list`.
 - Logs on Windows: `%APPDATA%\nl.jeremyklootwijk.clipper\clipper.log`
   (Settings → Troubleshooting → Open log folder). OBS logs are in `obs\config\obs-studio\logs\`
   in the same folder. Ask for the relevant lines when a bug report is vague.

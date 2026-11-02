@@ -307,11 +307,14 @@
       <h2>Troubleshooting</h2>
       <div class="row"><span>Log file and OBS logs</span><button id="logs">Open log folder</button></div>
       <h3>Report a problem</h3>
-      <p class="hint">Describe what went wrong and when. Clipper adds its log and the OBS log and sends it all to your Todoist Inbox.</p>
+      <p class="hint">Describe what went wrong and when. Clipper opens a new report on GitHub in your browser with the details and the end of the log filled in; check it and press "Create". Your user name, window titles and IP address are removed first. You need a free GitHub account.</p>
       <textarea id="report-text" rows="4" placeholder="What did you do, what happened, and roughly what time?"></textarea>
-      <div class="row"><span id="report-status"></span><button id="report-send" class="primary">Send report</button></div>
-      <div class="row"><span>Todoist token</span><input type="password" id="report-token" placeholder="Paste your API token" autocomplete="off"><button id="report-token-save">Save</button></div>
-      <p class="hint">Once: Todoist → Settings → Integrations → Developer → copy the API token. It stays on this PC.</p>
+      <div class="row"><span id="report-status"></span><button id="report-send" class="primary">Report on GitHub</button></div>
+      <details class="dev">
+        <summary>Developer: send reports to Todoist instead</summary>
+        <div class="row"><span>Todoist token</span><input type="password" id="report-token" placeholder="Paste your API token" autocomplete="off"><button id="report-token-save">Save</button></div>
+        <p class="hint">With a token, reports (with the full logs) go to that Todoist Inbox instead of GitHub. Todoist → Settings → Integrations → Developer. It stays on this PC.</p>
+      </details>
     </section>
    </div>
   </main>

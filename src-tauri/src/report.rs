@@ -1,10 +1,11 @@
-//! "Report a problem": sends the user's description plus the end of clipper.log
-//! and the newest OBS log to the owner's Todoist Inbox, so a bug report always
-//! comes with its log.
-//!
-//! The repo is public, so no key may be built in: the user pastes their own
-//! Todoist API token once. It is kept in `<data>/todoist-token` (not in
-//! settings.json, so it never reaches the UI or the log).
+//! "Report a problem".
+//! - Everyone: a GitHub issue on the Clipper repo, opened in the browser with the
+//!   description, a status summary and the end of clipper.log filled in. Issues
+//!   are public, so personal details are removed first (`redact`).
+//! - The owner: with a Todoist API token set, the report (with the full log
+//!   tails) goes to their Todoist Inbox instead. The repo is public, so no key
+//!   is built in: the token is kept in `<data>/todoist-token` (not in
+//!   settings.json, so it never reaches the UI or the log).
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -143,8 +144,108 @@ pub async fn send(data_dir: &Path, text: &str, summary: &str) -> Result<String> 
     Ok(task["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://app.todoist.com/app/task/{id}")))
 }
 
+const ISSUES: &str = "https://github.com/Jeremy0538/clipper/issues/new";
+/// Browsers and GitHub handle URLs up to about 8 KB; stay well below.
+const URL_MAX: usize = 7_000;
+
+/// Remove what must not end up in a public issue: the Windows user name in
+/// paths, window titles (Discord servers and DMs, browser tabs…) and IP
+/// addresses. What stays is enough to debug: exe names, classes, times, errors.
+pub fn redact(text: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RES: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    let res = RES.get_or_init(|| {
+        vec![
+            // C:\Users\name\…, C:/Users/name/…, /home/name/…
+            (Regex::new(r#"(?i)([A-Z]:[\\/]+Users[\\/]+)[^\\/\s"]+"#).unwrap(), "${1}<user>"),
+            (Regex::new(r#"(/home/)[^/\s"]+"#).unwrap(), "${1}<user>"),
+            // OBS window strings "title:class:exe" (OBS writes ":" in a title as "#3A")
+            (Regex::new(r#"[^\s":→][^":→\n]*:([A-Za-z0-9_.\- ]+):([^:\s"]+\.(?i:exe))"#).unwrap(), "<window>:${1}:${2}"),
+            // OBS log "\ttitle: …" lines
+            (Regex::new(r"(?m)^(\S*\s*title: ).*$").unwrap(), "${1}<window>"),
+            // IPv4 addresses (OBS logs the LAN address)
+            (Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap(), "<ip>"),
+        ]
+    });
+    let mut out = text.to_string();
+    for (re, with) in res {
+        out = re.replace_all(&out, *with).into_owned();
+    }
+    out
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// The "new issue" URL with everything filled in (redacted). The log part is
+/// shortened from the top until the URL fits.
+pub fn github_issue_url(text: &str, summary: &str) -> String {
+    let text = redact(text.trim());
+    let first = text.lines().next().unwrap_or("").chars().take(80).collect::<String>();
+    let title = url_encode(&format!("{}: {}", env!("CARGO_PKG_VERSION"), if first.is_empty() { "problem report" } else { &first }));
+    let summary = redact(summary);
+    let log = crate::log::path().and_then(|p| tail(p, 20_000)).map(|t| redact(&t)).unwrap_or_default();
+    let mut lines: Vec<&str> = log.lines().collect();
+    loop {
+        let body = format!(
+            "**What happened**\n{text}\n\n**Details**\n```\n{summary}\n```\n\n**End of clipper.log** (names, paths and window titles removed)\n```\n{}\n```\n",
+            lines.join("\n")
+        );
+        let url = format!("{ISSUES}?title={title}&body={}", url_encode(&body));
+        if url.len() <= URL_MAX || lines.is_empty() {
+            return url;
+        }
+        let drop = (lines.len() / 5).max(1);
+        lines.drain(..drop.min(lines.len()));
+    }
+}
+
+/// Open a URL in the default browser (no shell, so "&" in the URL is safe).
+pub fn open_in_browser(url: &str) -> std::io::Result<()> {
+    if cfg!(windows) {
+        std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()?;
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redacts_personal_details() {
+        let log = "2026-11-02 12:14:00.127 game detected: Discord (pid 18452, window \"〔🪴〕Het Grote Wiet Schuurtje | Alwyn's funzige hoekje - Discord:Chrome_WidgetWin_1:Discord.exe\")\n\
+                   2026-11-02 12:45:11.299 Window Capture → @Alwyn - Discord:Chrome_WidgetWin_1:Discord.exe\n\
+                   2026-11-02 12:13:56 data C:\\Users\\jerkl\\AppData\\Roaming\\x | clips C:\\Users\\jerkl\\Videos\\Clipper\n\
+                   OBS wrote C:/Users/jerkl/AppData/Roaming/x/incoming/Replay.mp4\n\
+                   12:13:58.981: \ttitle: 〔🪴〕Het Grote Wiet Schuurtje\n\
+                   Server started successfully on port 4466. Possible connect address: 192.168.1.168\n\
+                   ERROR Could not target Discord: SetInputSettings failed (code 600)";
+        let r = super::redact(log);
+        for gone in ["Wiet", "Alwyn", "jerkl", "192.168"] {
+            assert!(!r.contains(gone), "{gone} still in:\n{r}");
+        }
+        for kept in ["Chrome_WidgetWin_1:Discord.exe", "pid 18452", "code 600", "port 4466", "Users\\<user>\\Videos", "Window Capture → <window>"] {
+            assert!(r.contains(kept), "{kept} missing in:\n{r}");
+        }
+    }
+
+    #[test]
+    fn issue_url_fits() {
+        let u = super::github_issue_url(&"x".repeat(20_000), "Version 1");
+        assert!(u.len() < 40_000);
+        assert!(u.starts_with("https://github.com/Jeremy0538/clipper/issues/new?title="));
+    }
+
     use super::*;
 
     #[test]

@@ -631,7 +631,28 @@ async fn set_report_token(state: tauri::State<'_, AppState>, token: String) -> R
 #[tauri::command]
 async fn report_problem(state: tauri::State<'_, AppState>, text: String) -> Result<String, String> {
     clog!("problem report: {}", text.chars().take(300).collect::<String>().replace('\n', " / "));
-    let summary = {
+    let summary = report_summary(&state).await;
+    let url = report::send(&state.obs.data_dir, &text, &summary).await.map_err(|e| {
+        clog!("problem report failed: {e:#}");
+        format!("{e:#}")
+    })?;
+    clog!("problem report sent");
+    Ok(url)
+}
+
+/// Everyone without a Todoist token: open a filled-in GitHub issue (personal
+/// details removed) in the browser; the user checks it and presses Submit.
+#[tauri::command]
+async fn report_github(state: tauri::State<'_, AppState>, text: String) -> Result<(), String> {
+    clog!("problem report via GitHub: {}", text.chars().take(300).collect::<String>().replace('\n', " / "));
+    let summary = report_summary(&state).await;
+    let url = report::github_issue_url(&text, &summary);
+    report::open_in_browser(&url).map_err(|e| format!("Could not open the browser: {e}"))
+}
+
+/// Version, status and settings for a problem report (no secrets).
+async fn report_summary(state: &AppState) -> String {
+    {
         let u = state.user.lock().await;
         let s = state.status.lock().await;
         let obs = state.obs.settings.lock().unwrap().clone();
@@ -647,13 +668,7 @@ async fn report_problem(state: tauri::State<'_, AppState>, text: String) -> Resu
             serde_json::to_string(&u.audio).unwrap_or_default(),
             u.custom_games.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", "),
         )
-    };
-    let url = report::send(&state.obs.data_dir, &text, &summary).await.map_err(|e| {
-        clog!("problem report failed: {e:#}");
-        format!("{e:#}")
-    })?;
-    clog!("problem report sent");
-    Ok(url)
+    }
 }
 
 #[tauri::command]
@@ -1014,7 +1029,7 @@ pub fn run() {
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
-            set_report_token, report_problem, share_clip
+            set_report_token, report_problem, report_github, share_clip
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

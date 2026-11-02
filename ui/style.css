@@ -244,3 +244,5 @@ button.danger:hover:not(:disabled) { background:color-mix(in srgb, var(--danger)
 button.danger.armed, button.danger.armed:hover:not(:disabled) { background:var(--danger); border-color:var(--danger); color:var(--bg); }
 h1 { display:flex; align-items:center; gap:8px; }
 h1 .brand { width:24px; height:24px; display:block; }
+details.dev { margin-top:10px; color:var(--dim); }
+details.dev summary { cursor:pointer; font-size:13px; }
