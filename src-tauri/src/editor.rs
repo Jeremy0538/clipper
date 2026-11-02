@@ -200,6 +200,17 @@ pub async fn export(
     // make the file larger than the original.
     let fit_kbps = req.target_mb.map(|mb| ((mb * 8000.0 * 0.93 / length) - 128.0).clamp(250.0, 40_000.0) as u32);
     let reencode = trimmed || fit_kbps.is_some();
+    // Video bitrate of the original (file size minus ~160 kb/s per audio track).
+    // A trimmed copy may not use more per second than that, or it ends up
+    // bigger than the clip it was cut from.
+    let src_kbps: u32 = {
+        let bytes = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0) as f64;
+        let total = bytes * 8.0 / 1000.0 / info.duration.max(0.1);
+        (total - 160.0 * (info.sources.len() + 1) as f64).clamp(1500.0, 60_000.0) as u32
+    };
+    // Average 85 % of the original, never above it; a 1 s buffer keeps short
+    // clips from bursting past the original's size.
+    let (sb, smax, sbuf) = (format!("{}k", src_kbps * 85 / 100), format!("{src_kbps}k"), format!("{src_kbps}k"));
     let max_h: Option<u32> = fit_kbps
         .and_then(|k| if k < 2500 { Some(720) } else if k < 6000 { Some(1080) } else if k < 12_000 { Some(1440) } else { None })
         .filter(|&h| h < info.height);
@@ -288,17 +299,17 @@ pub async fn export(
         } else {
         match (trimmed, encoder) {
             (false, _) => { c.args(["-c:v", "copy"]); }
-            (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]); }
-            (true, "h264_amf") => { c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23", "-g", "60"]); }
-            (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]); }
-            (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]); }
+            (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
+            (true, "h264_amf") => { c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
+            (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
+            (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
         }
         }
         if !on_gpu {
             c.args(["-pix_fmt", "yuv420p"]);
         }
         if !keep.is_empty() {
-            let ab = if fit_kbps.is_some() { "128k" } else { "192k" };
+            let ab = if fit_kbps.is_some() { "128k" } else { "160k" }; // same as OBS
             c.args(["-c:a:0", "aac", "-b:a:0", ab, "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
             let sources_mapped = fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1);
             if sources_mapped {
