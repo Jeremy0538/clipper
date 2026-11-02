@@ -78,14 +78,22 @@ $("player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !listening) closePlayer(); });
 $("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
 
-// ---- select clips to combine (order = click order) ----
+// ---- select clips: combine (order = click order) or delete ----
 let selecting = false, selected = [];
+const isImage = (path) => /\.(png|jpe?g)$/i.test(path);
+function disarmDelete() {
+  const d = $("sel-delete");
+  d.classList.remove("armed");
+  d.textContent = selected.length ? `Delete ${selected.length}` : "Delete";
+}
 function syncSelection() {
   document.body.classList.toggle("selecting", selecting);
   $("sel-mode").textContent = selecting ? "Done" : "Select";
-  for (const id of ["sel-info", "sel-clear"]) $(id).classList.toggle("hidden", !selecting);
-  $("sel-combine").classList.toggle("hidden", !selecting || selected.length < 2);
-  $("sel-info").textContent = selected.length ? `${selected.length} selected` : "Click clips in the order you want";
+  for (const id of ["sel-info", "sel-clear", "sel-all"]) $(id).classList.toggle("hidden", !selecting);
+  $("sel-combine").classList.toggle("hidden", !selecting || selected.length < 2 || selected.some(isImage));
+  $("sel-delete").classList.toggle("hidden", !selecting || !selected.length);
+  disarmDelete();
+  $("sel-info").textContent = selected.length ? `${selected.length} selected` : "Click clips to select them";
   for (const el of document.querySelectorAll(".clip")) {
     const i = selected.indexOf(el.dataset.path);
     el.classList.toggle("selected", i >= 0);
@@ -98,6 +106,36 @@ function syncSelection() {
 }
 $("sel-mode").onclick = () => { selecting = !selecting; if (!selecting) selected = []; syncSelection(); };
 $("sel-clear").onclick = () => { selected = []; syncSelection(); };
+// All clips shown right now (respects the folder / Starred filter).
+$("sel-all").onclick = () => {
+  for (const el of document.querySelectorAll("#clips .clip")) {
+    if (!selected.includes(el.dataset.path)) selected.push(el.dataset.path);
+  }
+  syncSelection();
+};
+let delTimer;
+$("sel-delete").onclick = async () => {
+  const d = $("sel-delete");
+  if (!d.classList.contains("armed")) {   // first click arms, second deletes
+    d.classList.add("armed");
+    d.textContent = `Sure? Delete ${selected.length}`;
+    clearTimeout(delTimer);
+    delTimer = setTimeout(disarmDelete, 3000);
+    return;
+  }
+  clearTimeout(delTimer);
+  d.disabled = true;
+  let ok = 0;
+  const failed = [];
+  for (const path of [...selected]) {
+    try { await invoke("delete_clip", { path }); ok++; }
+    catch (err) { failed.push(err); }
+  }
+  d.disabled = false;
+  selected = []; selecting = false; syncSelection();
+  say(failed.length ? `Moved ${ok} to the recycle bin; ${failed.length} failed: ${failed[0]}` : `Moved ${ok} to the recycle bin.`);
+  loadClips();
+};
 $("sel-combine").onclick = async () => {
   $("sel-combine").disabled = true;
   say("Combining… (first time: downloading ffmpeg)");
@@ -160,7 +198,6 @@ function clipCard(c) {
   el.dataset.path = c.path;
   el.querySelector(".thumb").onclick = () => {
     if (selecting) {
-      if (isImg) return say("Screenshots can't be combined.");
       const i = selected.indexOf(c.path);
       if (i >= 0) selected.splice(i, 1); else selected.push(c.path);
       return syncSelection();

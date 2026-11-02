@@ -239,3 +239,6 @@ button { white-space:nowrap; }
   .settings-cols { display:block; max-width:1400px; margin:0 auto; columns:2; column-gap:16px; }
   .settings-cols > .card { break-inside:avoid; margin:0 0 16px; }
 }
+button.danger { color:var(--danger); border-color:color-mix(in srgb, var(--danger) 55%, var(--ctl-border)); }
+button.danger:hover:not(:disabled) { background:color-mix(in srgb, var(--danger) 14%, var(--ctl)); border-color:var(--danger); }
+button.danger.armed, button.danger.armed:hover:not(:disabled) { background:var(--danger); border-color:var(--danger); color:var(--bg); }
