@@ -4,6 +4,10 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.5
+- Clips left behind in an earlier clips folder can be moved later: Settings → Recording → **Move them now**.
+- More reliable: one key press never triggers an action twice, and a damaged OBS file no longer stops recording.
+
 ## 0.4.4
 - Picking a clips folder that already holds other files (or a whole drive) makes a **Clipper** folder inside it, so your other files are never touched.
 - New clips go to the new folder right away, also while your old clips are still moving.

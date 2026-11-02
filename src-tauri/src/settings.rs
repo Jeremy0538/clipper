@@ -43,6 +43,9 @@ pub struct UserSettings {
     pub clips_dir: String,
     /// The version whose "What's new" was shown last.
     pub last_version: String,
+    /// An earlier clips folder that still holds clips (not moved, or a move
+    /// that could not finish); Settings offers to move them.
+    pub leftover_clips_dir: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -103,7 +106,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: false, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false, clips_dir: String::new(), last_version: String::new() }
+        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: false, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false, clips_dir: String::new(), last_version: String::new(), leftover_clips_dir: String::new() }
     }
 }
 

@@ -327,6 +327,9 @@ struct SettingsView {
     audio: AudioSettings,
     setup_done: bool,
     clips_dir: String,
+    /// An earlier folder that still holds clips, and how many ("" / 0 = none).
+    leftover_dir: String,
+    leftover_count: usize,
     /// The clips folder is not the default Videos\Clipper.
     clips_dir_custom: bool,
     /// A Todoist token is stored, so "Report a problem" can send.
@@ -392,6 +395,8 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         audio: u.audio.clone(),
         setup_done: u.setup_done,
         clips_dir: state.clips_dir().to_string_lossy().into_owned(),
+        leftover_count: if u.leftover_clips_dir.is_empty() { 0 } else { clips::list(std::path::Path::new(&u.leftover_clips_dir)).len() },
+        leftover_dir: u.leftover_clips_dir.clone(),
         clips_dir_custom: state.clips_dir() != state.default_clips_dir,
         report_ready: report::token(&state.obs.data_dir).is_some(),
         encoder: if state.obs.settings.lock().unwrap().force_cpu { gpu::Vendor::Cpu } else { gpu::detect() }.label().into(),
@@ -862,22 +867,38 @@ async fn set_clips_dir(app: AppHandle, path: String, move_clips: bool) -> Result
     r
 }
 
+/// The real path of `p`, also when it doesn't exist yet (then its parent's).
+fn canon(p: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => std::fs::canonicalize(parent).map(|c| c.join(name)).unwrap_or(p.to_path_buf()),
+        _ => p.to_path_buf(),
+    })
+}
+
 async fn change_clips_dir(app: &AppHandle, path: &str, move_clips: bool) -> Result<ClipsDirChange, String> {
     let st = app.state::<AppState>();
     let old = st.clips_dir();
     let new = if path.is_empty() { st.default_clips_dir.clone() } else { clips::target_for(std::path::Path::new(path)) };
+    // All checks before anything is created on disk.
     if !new.is_absolute() {
         return Err("Choose a complete folder, like D:\\Clips".into());
     }
-    std::fs::create_dir_all(&new).map_err(|e| format!("Can't use {}: {e}", new.display()))?;
-    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or(p.to_path_buf());
     let (canon_old, canon_new) = (canon(&old), canon(&new));
-    if canon_new != canon_old && (canon_new.starts_with(&canon_old) || canon_old.starts_with(&canon_new)) {
+    let same = canon_new == canon_old;
+    if !same && (canon_new.starts_with(&canon_old) || canon_old.starts_with(&canon_new)) {
         return Err("Pick a folder that is not inside the current clips folder (or the other way around)".into());
     }
     if canon_new.starts_with(canon(&st.obs.data_dir)) {
         return Err("That is Clipper's own data folder; pick another one".into());
     }
+    if move_clips && !same && !clips::is_ours(&old) {
+        return Err(format!(
+            "Clipper can't move the clips out of {}: it doesn't know that folder as its own. \
+             Untick \"Move my clips there too\" and move them yourself.",
+            old.display()
+        ));
+    }
+    std::fs::create_dir_all(&new).map_err(|e| format!("Can't use {}: {e}", new.display()))?;
     clips::mark(&new).map_err(|e| format!("Clipper can't write in {}: {e}", new.display()))?;
     app.asset_protocol_scope().allow_directory(&new, true).map_err(|e| e.to_string())?;
 
@@ -886,6 +907,9 @@ async fn change_clips_dir(app: &AppHandle, path: &str, move_clips: bool) -> Resu
     {
         let mut u = st.user.lock().await;
         u.clips_dir = if new == st.default_clips_dir { String::new() } else { new.to_string_lossy().into_owned() };
+        if canon(std::path::Path::new(&u.leftover_clips_dir)) == canon_new {
+            u.leftover_clips_dir.clear(); // back to the folder that still had clips
+        }
         u.save(&st.settings_file).map_err(|e| e.to_string())?;
     }
     let incoming = incoming_dir(&st.obs.data_dir, &new, &st.default_clips_dir);
@@ -897,16 +921,54 @@ async fn change_clips_dir(app: &AppHandle, path: &str, move_clips: bool) -> Resu
     }
 
     let (mut moved, mut left) = (0, 0);
-    if move_clips && canon_new != canon_old {
-        let _ = app.emit("clips-moving", true);
-        let favs = clips::Favorites::new(&st.obs.data_dir);
-        let (o, n) = (old.clone(), new.clone());
-        (moved, left) = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs))
-            .await
-            .map_err(|e| e.to_string())?;
+    if move_clips && !same {
+        (moved, left) = move_clips_now(app, &old, &new).await?;
+    } else if !same {
+        left = clips::list(&old).len();
     }
-    clog!("clips folder {} → {} (moved {moved}, {left} could not be moved)", old.display(), new.display());
+    // Clips still in the old folder: remember it, so Settings can offer to move them.
+    if left > 0 && clips::is_ours(&old) {
+        let mut u = st.user.lock().await;
+        u.leftover_clips_dir = old.to_string_lossy().into_owned();
+        u.save(&st.settings_file).map_err(|e| e.to_string())?;
+    }
+    clog!("clips folder {} → {} (moved {moved}, {left} still in the old folder)", old.display(), new.display());
     Ok(ClipsDirChange { dir: new.to_string_lossy().into_owned(), left, old: old.to_string_lossy().into_owned() })
+}
+
+async fn move_clips_now(app: &AppHandle, from: &std::path::Path, to: &std::path::Path) -> Result<(usize, usize), String> {
+    let st = app.state::<AppState>();
+    let _ = app.emit("clips-moving", true);
+    let favs = clips::Favorites::new(&st.obs.data_dir);
+    let (o, n) = (from.to_path_buf(), to.to_path_buf());
+    let r = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs)).await.map_err(|e| e.to_string());
+    let _ = app.emit("clips-moving", false);
+    r
+}
+
+/// Settings → "Move them now": the clips left in an earlier folder.
+#[tauri::command]
+async fn move_leftover_clips(app: AppHandle) -> Result<ClipsDirChange, String> {
+    let st = app.state::<AppState>();
+    let from = PathBuf::from(st.user.lock().await.leftover_clips_dir.clone());
+    if from.as_os_str().is_empty() {
+        return Err("There are no clips left to move".into());
+    }
+    if st.moving.swap(true, Ordering::SeqCst) {
+        return Err("Clips are still being moved; wait until that is done".into());
+    }
+    let to = st.clips_dir();
+    let r = move_clips_now(&app, &from, &to).await;
+    st.moving.store(false, Ordering::SeqCst);
+    let (moved, _) = r?;
+    let left = clips::list(&from).len();
+    if left == 0 {
+        let mut u = st.user.lock().await;
+        u.leftover_clips_dir.clear();
+        u.save(&st.settings_file).map_err(|e| e.to_string())?;
+    }
+    clog!("moved {moved} leftover clip(s) from {}; {left} still there", from.display());
+    Ok(ClipsDirChange { dir: to.to_string_lossy().into_owned(), left, old: from.to_string_lossy().into_owned() })
 }
 
 #[tauri::command]
@@ -1064,7 +1126,7 @@ async fn watch_events(app: AppHandle) {
                     None => st.last_game.lock().unwrap().clone(),
                 };
                 clog!("OBS wrote {src}");
-                match clips::adopt(src.as_ref(), &st.clips_dir(), game.as_deref()) {
+                match adopt_blocking(src, st.clips_dir(), game.clone()).await {
                     Ok(p) => {
                         clog!("clip saved: {}", p.display());
                         let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1091,7 +1153,7 @@ async fn watch_events(app: AppHandle) {
                     let st = app.state::<AppState>();
                     if let Some(src) = d["outputPath"].as_str() {
                         let folder = st.rec_folder.lock().unwrap().take().unwrap_or_else(|| "Screen recording".into());
-                        match clips::adopt(src.as_ref(), &st.clips_dir(), Some(&folder)) {
+                        match adopt_blocking(src, st.clips_dir(), Some(folder.clone())).await {
                             Ok(p) => {
                                 clog!("recording saved: {}", p.display());
                                 notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
@@ -1141,6 +1203,12 @@ async fn watch_events(app: AppHandle) {
     }
 }
 
+/// Moving a clip in can be a multi-GB copy (other drive): not on the event loop.
+async fn adopt_blocking(src: &str, clips_dir: PathBuf, game: Option<String>) -> anyhow::Result<PathBuf> {
+    let src = PathBuf::from(src);
+    tauri::async_runtime::spawn_blocking(move || clips::adopt(&src, &clips_dir, game.as_deref())).await?
+}
+
 fn dir_from_env(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
@@ -1171,7 +1239,7 @@ pub fn run() {
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
-            set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir, whats_new
+            set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir, whats_new, move_leftover_clips
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -1196,9 +1264,19 @@ pub fn run() {
                 }
             }
             std::fs::create_dir_all(&clips_dir)?;
-            // Videos\Clipper is always ours; a chosen folder was marked when chosen.
+            // Videos\Clipper is always ours. A chosen folder is marked when it
+            // is chosen; one chosen in 0.4.2/0.4.3 (before markers) only when it
+            // holds nothing but clips, else the storage limit stays off there.
             if std::fs::create_dir_all(&default_clips_dir).is_ok() {
                 let _ = clips::mark(&default_clips_dir);
+            }
+            if !clips::is_ours(&clips_dir) {
+                if clips::looks_like_clips(&clips_dir) {
+                    let _ = clips::mark(&clips_dir);
+                    clog!("clips folder {} marked as Clipper's", clips_dir.display());
+                } else {
+                    clog!("clips folder {} holds other files: storage limit and moving clips are off there", clips_dir.display());
+                }
             }
             // The page may only load files from the clips folder (clips, screenshots)
             // and Clipper's own data folder (editor scrub images, test clip):

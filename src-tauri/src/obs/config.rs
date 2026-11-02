@@ -208,7 +208,11 @@ pub fn write_all(paths: &ObsPaths, s: &Settings, incoming: &Path, password: &str
             }))?,
         )?;
     }
-    register_script(&collection, &c.join(MONO_SCRIPT))?;
+    // Only the mono option depends on this: a damaged collection file (OBS
+    // killed while saving) must not keep OBS from starting.
+    if let Err(e) = register_script(&collection, &c.join(MONO_SCRIPT)) {
+        crate::clog!("ERROR could not add the mono script to the OBS scene collection: {e:#}");
+    }
     Ok(())
 }
 

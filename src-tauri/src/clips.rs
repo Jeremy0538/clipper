@@ -49,11 +49,9 @@ pub fn adopt(src: &Path, clips_dir: &Path, game: Option<&str>) -> Result<PathBuf
         dst = clips_dir.join(format!("{base} ({n}).{ext}"));
         n += 1;
     }
-    if fs::rename(src, &dst).is_err() {
-        // Different drive: copy, then remove.
-        fs::copy(src, &dst)?;
-        fs::remove_file(src)?;
-    }
+    // Across drives (a buffer started before the clips folder moved) this is
+    // copy + delete, without leaving half or double files.
+    move_file(src, &dst)?;
     Ok(dst)
 }
 
@@ -88,6 +86,32 @@ pub fn mark(dir: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_media(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["mp4", "mkv", "mov", "png", "jpg"].contains(&e.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Only what Clipper puts in a clips folder: clips and screenshots, directly
+/// or one folder deep, plus its own "." folders. Used to mark a folder that
+/// was chosen before markers existed (0.4.2/0.4.3).
+pub fn looks_like_clips(dir: &Path) -> bool {
+    let ok_file = |p: &Path| is_media(p) || p.file_name().is_some_and(|n| n == "desktop.ini");
+    fs::read_dir(dir).is_ok_and(|r| {
+        r.flatten().all(|e| {
+            let p = e.path();
+            if e.file_name().to_string_lossy().starts_with('.') {
+                return true;
+            }
+            if p.is_dir() {
+                fs::read_dir(&p).is_ok_and(|r| r.flatten().all(|f| f.path().is_file() && ok_file(&f.path())))
+            } else {
+                ok_file(&p)
+            }
+        })
+    })
 }
 
 /// Nothing in it yet (Windows' own desktop.ini doesn't count).
@@ -125,6 +149,7 @@ fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// (moved, failed).
 pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
     let (mut moved, mut failed) = (0, 0);
+    let mut renamed: Vec<(String, PathBuf)> = vec![];
     if !is_ours(from) {
         crate::clog!("not moving clips out of {}: not a Clipper folder", from.display());
         return (0, 0);
@@ -145,7 +170,7 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
         let key = fav_key(&src.to_string_lossy());
         match move_file(src, &dst) {
             Ok(()) => {
-                favs.moved(&key, &dst.to_string_lossy());
+                renamed.push((key, dst));
                 moved += 1;
             }
             Err(e) => {
@@ -171,6 +196,7 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
             one(&p, to);
         }
     }
+    favs.moved_many(&renamed); // one read and one write, not one per clip
     (moved, failed)
 }
 
@@ -365,6 +391,20 @@ impl Favorites {
             self.save(&v);
         }
     }
+    /// After moving many files: (fav_key of the old path, new path).
+    pub fn moved_many(&self, moves: &[(String, PathBuf)]) {
+        let mut v = self.load();
+        let mut changed = false;
+        for (from_key, to) in moves {
+            if let Some(p) = v.iter_mut().find(|p| *p == from_key) {
+                *p = fav_key(&to.to_string_lossy());
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(&v);
+        }
+    }
     /// Is this clip (path as listed) starred? `favs` comes from load().
     pub fn has(favs: &[String], path: &str) -> bool {
         favs.contains(&fav_key(path))
@@ -426,10 +466,16 @@ mod fav_tests {
         // ...found through the link path (what the clip list shows).
         let loaded = favs.load();
         assert!(super::Favorites::has(&loaded, &link.join("a.mp4").to_string_lossy()));
-        // And the storage limit keeps it.
-        assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 0);
+        // And the storage limit keeps it (in a folder that is Clipper's).
+        super::mark(&real).unwrap();
+        std::fs::write(real.join("b.mp4"), b"y").unwrap();
+        assert_eq!(super::enforce_limit(&link, 0.000_000_000_1, &loaded), 1, "the unstarred one goes");
+        assert!(!real.join("b.mp4").exists());
         assert!(real.join("a.mp4").exists());
         assert_eq!(super::target_for(&base), base.join("Clipper"), "a folder with other things in it");
+        assert!(super::looks_like_clips(&real));
+        std::fs::write(base.join("notes.txt"), b"x").unwrap();
+        assert!(!super::looks_like_clips(&base));
         assert_eq!(super::target_for(&base.join("new")), base.join("new"));
         std::fs::remove_dir_all(base).unwrap();
     }

@@ -174,11 +174,14 @@ fn key_down(vk: u32, mods: u32, via: &'static str, now: u64) -> Option<Slot> {
     if slot == Slot::Clip && !ARMED.load(Ordering::SeqCst) {
         return None;
     }
-    let prev = LAST[slot as usize].load(Ordering::SeqCst);
-    if prev != 0 && now.saturating_sub(prev) < SAME_PRESS_MS {
+    // Claim the press in one atomic step: the hook and raw-input threads can
+    // get here at the same instant.
+    let claimed = LAST[slot as usize].try_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
+        (prev == 0 || now.saturating_sub(prev) >= SAME_PRESS_MS).then_some(now)
+    });
+    if claimed.is_err() {
         return None;
     }
-    LAST[slot as usize].store(now, Ordering::SeqCst);
     crate::clog!("{slot:?} key pressed ({via})");
     Some(slot)
 }
@@ -202,14 +205,14 @@ pub fn start(app: tauri::AppHandle) {
         },
         UI::{
             Input::{
-                GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
+                GetRawInputData, GetRegisteredRawInputDevices, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
                 RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEKEYBOARD,
                 KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU, VK_SHIFT},
             },
             WindowsAndMessaging::{
                 CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-                RegisterClassW, SetWindowsHookExW, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG,
-                WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+                RegisterClassW, SetTimer, SetWindowsHookExW, HC_ACTION, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG,
+                WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_KEYDOWN, WM_TIMER, WM_KEYUP,
                 WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
             },
         },
@@ -262,7 +265,35 @@ pub fn start(app: tauri::AppHandle) {
     }
 
     // ---- raw input ----
+    // One window per process gets keyboard raw input. Tauri's event loop may
+    // register its own window too (device events) and would silently take it
+    // over: check now and then, and take it back.
+    unsafe fn register(hwnd: HWND) -> windows::core::Result<()> {
+        // Keyboard (generic desktop page 1, usage 6), also while another app has focus.
+        let dev = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+        RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+    }
+    unsafe fn still_ours(hwnd: HWND) -> bool {
+        let mut list = [RAWINPUTDEVICE::default(); 16];
+        let mut n = list.len() as u32;
+        let got = GetRegisteredRawInputDevices(Some(list.as_mut_ptr()), &mut n, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+        if got == u32::MAX {
+            return true; // can't tell: leave it
+        }
+        list[..got as usize].iter().any(|d| d.usUsagePage == 1 && d.usUsage == 6 && d.hwndTarget == hwnd)
+    }
+    const CHECK_TIMER: usize = 1;
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if msg == WM_TIMER && wp.0 == CHECK_TIMER {
+            if !still_ours(hwnd) {
+                match register(hwnd) {
+                    Ok(()) => crate::clog!("raw keyboard input was taken over; registered again"),
+                    Err(e) => crate::clog!("ERROR raw keyboard input lost and could not register again: {e}"),
+                }
+            }
+            return LRESULT(0);
+        }
         if msg == WM_INPUT {
             let mut raw = RAWINPUT::default();
             let mut size = std::mem::size_of::<RAWINPUT>() as u32;
@@ -310,9 +341,8 @@ pub fn start(app: tauri::AppHandle) {
             }
             let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("ClipperRawKeys"), w!(""), WINDOW_STYLE(0),
                 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(inst), None)?;
-            // Keyboard (generic desktop page 1, usage 6), also while another app has focus.
-            let dev = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
-            RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32)?;
+            register(hwnd)?;
+            SetTimer(Some(hwnd), CHECK_TIMER, 10_000, None);
             Ok(())
         })();
         match r {

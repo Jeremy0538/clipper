@@ -351,7 +351,24 @@ function syncClipsDir() {
     $(p + "clips-dir").textContent = settings.clips_dir;
     $(p + "clips-dir-default").classList.toggle("hidden", !settings.clips_dir_custom);
   }
+  $("leftover-row").classList.toggle("hidden", !settings.leftover_count);
+  $("leftover-text").textContent = `${settings.leftover_count} clip(s) are still in ${settings.leftover_dir}`;
 }
+async function refreshClipsDir() {
+  const s = await invoke("get_settings").catch(() => null);
+  if (s) for (const k of ["clips_dir", "clips_dir_custom", "leftover_dir", "leftover_count"]) settings[k] = s[k];
+  syncClipsDir();
+}
+$("leftover-move").onclick = async () => {
+  $("leftover-move").disabled = true;
+  try {
+    const r = await invoke("move_leftover_clips");
+    say(r.left ? `${r.left} file(s) still could not be moved (in use?). Close them and try again.` : "All clips moved to " + r.dir);
+  } catch (err) { say(String(err)); }
+  $("leftover-move").disabled = false;
+  await refreshClipsDir();
+  loadClips();
+};
 const CLIP_DIR_BUTTONS = ["clips-dir-change", "clips-dir-default", "su-clips-dir-change", "su-clips-dir-default"];
 async function changeClipsFolder(reset, move) {
   try {
@@ -360,14 +377,13 @@ async function changeClipsFolder(reset, move) {
     CLIP_DIR_BUTTONS.forEach((id) => ($(id).disabled = true));
     say("Changing the clips folder…");
     const r = await invoke("set_clips_dir", { path, moveClips: move });
-    say(r.left ? `New clips now go to ${r.dir}. ${r.left} file(s) could not be moved (in use?) and are still in ${r.old}.`
+    say(r.left ? `New clips now go to ${r.dir}. ${r.left} clip(s) are still in ${r.old}: Settings → Recording can move them later.`
       : "Clips folder: " + r.dir);
   } catch (err) {
     say(String(err));
   } finally {
     CLIP_DIR_BUTTONS.forEach((id) => ($(id).disabled = false));
-    const s = await invoke("get_settings").catch(() => null);
-    if (s) { settings.clips_dir = s.clips_dir; settings.clips_dir_custom = s.clips_dir_custom; syncClipsDir(); }
+    await refreshClipsDir();
     loadClips();
   }
 }
