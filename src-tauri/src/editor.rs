@@ -167,16 +167,17 @@ async fn peak_db(tools: &Tools, path: &Path, index: usize, start: f64, end: f64)
 /// "<Game> 2026-11-01 14-17-58" → "<Game>"; also strips an earlier " (edited)".
 pub fn base_name(stem: &str) -> String {
     let mut s = stem.trim().to_string();
-    let b = s.as_bytes();
-    if b.len() >= 20 {
-        let tail = &s[s.len() - 19..];
+    // The last 19 characters (not bytes: "é" is two bytes and must not be cut).
+    let cut = s.char_indices().rev().nth(18).map(|(i, _)| i);
+    if let Some(cut) = cut.filter(|&c| c > 0) {
+        let tail = &s[cut..];
         let shape_ok = tail.chars().enumerate().all(|(i, ch)| match i {
             4 | 7 | 13 | 16 => ch == '-',
             10 => ch == ' ',
             _ => ch.is_ascii_digit(),
         });
         if shape_ok {
-            s.truncate(s.len() - 19);
+            s.truncate(cut);
         }
     }
     let s = s.trim().trim_end_matches("(edited)").trim().to_string();
@@ -198,6 +199,13 @@ pub async fn export(
     // Fit-to-size: total bits / seconds, minus the audio, with 7 % headroom for the container.
     // Capped at the "High" recording bitrate: a big limit (Nitro, 1 GB) must not
     // make the file larger than the original.
+    if let Some(mb) = req.target_mb {
+        // Below ~250 kb/s of video the clip can't be made to fit in a watchable way.
+        let max_secs = (mb * 8000.0 * 0.93 / (250.0 + 128.0)).floor();
+        if length > max_secs {
+            bail!("This clip is too long for {mb} MB. Trim it to {max_secs:.0} seconds or less in the editor first.");
+        }
+    }
     let fit_kbps = req.target_mb.map(|mb| ((mb * 8000.0 * 0.93 / length) - 128.0).clamp(250.0, 40_000.0) as u32);
     let reencode = trimmed || fit_kbps.is_some();
     // Video bitrate of the original (file size minus ~160 kb/s per audio track).
@@ -503,5 +511,17 @@ mod combine_tests {
         let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
         let p = super::combine(&tools, &out, &clips, |_| {}).await.unwrap();
         println!("combined {}", p.display());
+    }
+}
+
+#[cfg(test)]
+mod base_name_tests {
+    #[test]
+    fn non_ascii_names_do_not_panic() {
+        assert_eq!(super::base_name("Rocket League 2026-11-01 14-17-58"), "Rocket League");
+        assert_eq!(super::base_name("Résumé van de finale é"), "Résumé van de finale é");
+        assert_eq!(super::base_name("Ölçek ü 2026-11-01 14-17-58"), "Ölçek ü");
+        assert_eq!(super::base_name("ééééééééééééééééééééé"), "ééééééééééééééééééééé");
+        assert_eq!(super::base_name("Goal (edited)"), "Goal");
     }
 }

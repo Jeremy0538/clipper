@@ -135,6 +135,8 @@ pub async fn run(app: AppHandle) {
                         crate::notify::info(&app, "Using CPU encoding", "The GPU encoder could not start");
                     } else {
                         report_error(&app, format!("Could not start clipping: {e:#}"));
+                        // Don't retry (and report) every 2 s; the next game or Start clipping tries again.
+                        st.user_stopped.store(true, Ordering::SeqCst);
                     }
                 }
             }

@@ -149,9 +149,11 @@ pub fn start(app: tauri::AppHandle) {
                     // Auto-repeat sends more key-downs: fire once per press.
                     let first = !KEY_DOWN[i].swap(true, Ordering::SeqCst);
                     let m = MODS[i].load(Ordering::SeqCst);
-                    let mods_ok = (m & 1 == 0 || held(VK_SHIFT.0))
-                        && (m & 2 == 0 || held(VK_CONTROL.0))
-                        && (m & 4 == 0 || held(VK_MENU.0));
+                    // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with
+                    // F8 and Shift+F8 on two slots only one of them fires.
+                    let mods_ok = (m & 1 != 0) == held(VK_SHIFT.0)
+                        && (m & 2 != 0) == held(VK_CONTROL.0)
+                        && (m & 4 != 0) == held(VK_MENU.0);
                     let armed = slot != Slot::Clip || ARMED.load(Ordering::SeqCst);
                     if first && mods_ok && armed {
                         if let Some(tx) = TX.get() {

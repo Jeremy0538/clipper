@@ -59,7 +59,12 @@ impl ObsManager {
             let started = Instant::now();
             match self.run_once(&report).await {
                 Ok(()) => report("restarting".into()),
-                Err(e) => report(format!("error: {e:#}")),
+                Err(e) => {
+                    // A restart() during start-up ended here: the flag must not make a
+                    // later real crash look like an intended restart.
+                    self.restarting.store(false, Ordering::SeqCst);
+                    report(format!("error: {e:#}"))
+                }
             }
             if self.quitting.load(Ordering::SeqCst) {
                 break;
@@ -272,7 +277,13 @@ impl ObsManager {
             const NO_WINDOW: u32 = 0x0800_0000;
             let _ = std::process::Command::new("taskkill").args(["/PID", &pid])
                 .creation_flags(NO_WINDOW).status();
-            std::thread::sleep(Duration::from_secs(3));
+            let id: u32 = pid.parse().unwrap_or(0);
+            for _ in 0..30 {
+                if !process_alive(id) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
             let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid])
                 .creation_flags(NO_WINDOW).status();
         }
@@ -289,6 +300,22 @@ impl ObsManager {
             }
             let _ = std::process::Command::new("kill").args(["-KILL", &pid]).status();
         }
+    }
+}
+
+/// The process still runs (an exited process can still be opened while handles
+/// to it exist, so wait on it instead of only opening it).
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { return false };
+        let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+        let _ = CloseHandle(h);
+        running
     }
 }
 

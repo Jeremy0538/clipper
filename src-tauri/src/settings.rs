@@ -101,10 +101,18 @@ impl Default for UserSettings {
 
 impl UserSettings {
     pub fn load(file: &Path) -> Self {
-        let mut s: Self = std::fs::read_to_string(file)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let mut s: Self = match std::fs::read_to_string(file) {
+            Err(_) => Self::default(), // first start
+            Ok(t) => match serde_json::from_str(&t) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Keep the damaged file for the log/report instead of losing it on the next save.
+                    let _ = std::fs::copy(file, file.with_extension("broken.json"));
+                    crate::clog!("ERROR settings.json unreadable ({e}); using defaults, copy kept as settings.broken.json");
+                    Self::default()
+                }
+            },
+        };
         if s.hotkey.vk().is_none() {
             s.hotkey = Hotkey::default();
         }
@@ -118,7 +126,11 @@ impl UserSettings {
         s
     }
 
+    /// Write to a temp file and rename it over the old one, so a crash or power
+    /// loss mid-write never leaves a half settings.json.
     pub fn save(&self, file: &Path) -> std::io::Result<()> {
-        std::fs::write(file, serde_json::to_string_pretty(self)?)
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, file)
     }
 }

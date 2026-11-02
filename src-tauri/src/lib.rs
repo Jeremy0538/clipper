@@ -149,6 +149,8 @@ pub(crate) async fn save_clip_inner(app: &AppHandle) -> Result<(), String> {
     }
     .await;
     if let Err(e) = &r {
+        // A failed save must not block the next press for 2 s.
+        *LAST.lock().unwrap() = None;
         report_error(app, format!("Could not save clip: {e}"));
     }
     r
@@ -168,11 +170,13 @@ pub(crate) async fn take_screenshot(app: &AppHandle) -> Result<(), String> {
     let dir = st.clips_dir.join(clips::sanitize(&folder));
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join(format!("{} {}.png", clips::sanitize(&folder), chrono::Local::now().format("%Y-%m-%d %H-%M-%S")));
-    let scene = st.obs.client.call("GetCurrentProgramScene", json!({})).await.map_err(|e| e.to_string())?;
-    let r = st.obs.client.call("SaveSourceScreenshot", json!({
-        "sourceName": scene["currentProgramSceneName"], "imageFormat": "png",
-        "imageFilePath": file.to_string_lossy(),
-    })).await;
+    let r = async {
+        let scene = st.obs.client.call("GetCurrentProgramScene", json!({})).await?;
+        st.obs.client.call("SaveSourceScreenshot", json!({
+            "sourceName": scene["currentProgramSceneName"], "imageFormat": "png",
+            "imageFilePath": file.to_string_lossy(),
+        })).await
+    }.await;
     if entered {
         let _ = modes::leave_screen(app).await;
     }
@@ -798,6 +802,7 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
         .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
     clog!("editor: saved {}", out.display());
     let _ = app.emit("clip-saved", out.to_string_lossy());
+    after_new_file(&app).await;
     Ok(out.to_string_lossy().into_owned())
 }
 
@@ -831,6 +836,9 @@ async fn editor_track(state: tauri::State<'_, AppState>, index: usize) -> Result
 async fn combine_clips(app: AppHandle, paths: Vec<String>) -> Result<String, String> {
     let st = app.state::<AppState>();
     let ps = paths.iter().map(|p| clips::checked(&st.clips_dir, p)).collect::<Result<Vec<_>, _>>()?;
+    if ps.len() < 2 {
+        return Err("Pick at least two clips".into());
+    }
     let tools = tools_for(&app).await?;
     let dir = ps[0].parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir.clone());
     clog!("combine {} clips", ps.len());
@@ -1074,9 +1082,8 @@ pub fn run() {
                     "save" => {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(e) = save_clip_inner(&app).await {
-                                let _ = app.emit("error", e);
-                            }
+                            // save_clip_inner already reports the error itself.
+                            let _ = save_clip_inner(&app).await;
                         });
                     }
                     "record" => {

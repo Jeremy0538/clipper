@@ -198,7 +198,8 @@ pub fn rename(p: &Path, new_name: &str) -> Result<PathBuf, String> {
     if dst == p {
         return Ok(dst);
     }
-    if dst.exists() {
+    let only_case = dst.to_string_lossy().to_lowercase() == p.to_string_lossy().to_lowercase();
+    if dst.exists() && !only_case {
         return Err("A clip with that name already exists".into());
     }
     fs::rename(p, &dst).map_err(|e| e.to_string())?;
