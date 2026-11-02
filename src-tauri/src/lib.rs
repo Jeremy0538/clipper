@@ -1028,6 +1028,12 @@ pub fn run() {
             };
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&clips_dir)?;
+            // The page may only load files from the clips folder (clips, screenshots)
+            // and Clipper's own data folder (editor scrub images, test clip):
+            // tauri.conf.json leaves the asset scope empty.
+            let scope = app.asset_protocol_scope();
+            scope.allow_directory(&clips_dir, true)?;
+            scope.allow_directory(&data_dir, true)?;
             log::init(data_dir.join("clipper.log"));
             clips::sort_into_folders(&clips_dir);
             updater::cleanup();

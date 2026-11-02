@@ -1,0 +1,40 @@
+/* Same colours as the app (style.css). */
+:root, :root[data-theme="light"] {
+  color-scheme: light;
+  --card:#ffffff; --fg:#141414; --dim:#555b63; --line:#d9dde3;
+  --accent:#005fb8; --ok:#0f7b0f; --danger:#c42b1c;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444;
+  --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+}
+:root[data-theme="oled"] {
+  color-scheme: dark;
+  --card:#0e0e0e; --fg:#ffffff; --dim:#b0b0b0; --line:#2f2f2f;
+  --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --card:#272727; --fg:#ffffff; --dim:#bdbdbd; --line:#444444;
+    --accent:#60cdff; --ok:#6ccb5f; --danger:#ff99a4;
+  }
+}
+html, body { margin:0; background:transparent; overflow:hidden;
+  font:14px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+.card { --edge:var(--accent); box-sizing:border-box; margin:6px; height:72px; display:flex; align-items:center; gap:12px;
+  padding:0 16px 0 14px; border-radius:10px; background:var(--card); color:var(--fg);
+  border:1px solid var(--line); border-left:4px solid var(--edge);
+  box-shadow:0 4px 14px rgba(0,0,0,.28); opacity:0; transform:translateX(24px); }
+.card.saved { --edge:var(--ok); }
+.card.error { --edge:var(--danger); }
+.card.show { animation:in .18s ease-out forwards, out .3s ease-in 2.2s forwards; }
+@keyframes in { to { opacity:1; transform:none; } }
+@keyframes out { from { opacity:1; transform:none; } to { opacity:0; transform:translateX(24px); } }
+.logo { width:34px; height:34px; flex:none; }
+.text { min-width:0; }
+.t { font-weight:600; font-size:14.5px; display:flex; align-items:center; gap:6px; }
+.t i { width:8px; height:8px; border-radius:50%; background:var(--edge); flex:none; }
+.d { color:var(--dim); font-size:13px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:250px; }
+.d:empty { display:none; }

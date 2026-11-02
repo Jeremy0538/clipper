@@ -46,6 +46,9 @@ scripts/release.sh 0.3.1 "What changed, in plain English for the tester"   # bui
   `src-tauri/target/x86_64-pc-windows-msvc/release/clipper.exe`, commits "Release X.Y.Z", moves
   branch `test` to HEAD, pushes `main` and `test`, then runs
   `gh release create vX.Y.Z clipper.exe --prerelease`. Add `--stable` to make it the latest release.
+- **Stable vs test builds:** new installs have "Include test builds" off (since 0.4.0) and only get
+  GitHub's *latest* (non-pre-)release; the owner has it on. Ship a test build first, and once the owner
+  has tested it, promote it: `gh release edit vX.Y.Z --prerelease=false --latest`.
 - The updater accepts any release tagged `vX.Y.Z` that is newer than the running version and has
   an asset named exactly `clipper.exe`. It checks the sha256 digest from the GitHub API.
 - No NSIS/MSI: the exe installs itself (`installer.rs`).
@@ -108,6 +111,11 @@ stream tag `name`.
   `node scripts/obsctl.mjs <data dir> <Request> [json]` drives the private OBS.
 - The page is zoomed with the window (`fit_zoom` in lib.rs, 1100×720 = 1.0, max 1.6), so the CSS is
   written for the default window size.
+- Security (0.4.0): strict CSP in tauri.conf.json (no inline scripts/styles: `toast.html` uses
+  `toast.css`/`toast.js`), and the asset protocol scope is empty in the config; `run()` allows only the
+  clips folder and the data folder at runtime. A new place the page loads files from must be added there.
+- On Linux, WebKitGTK here can't play the H.264 clips (MediaError 4) even with the old open config;
+  that is the dev machine, not Clipper. Images load fine.
 - UI screenshots on Linux: WebKitGTK windows can't be grabbed, so render a copy of `ui/` in headless
   Chromium with a mocked `window.__TAURI__` (`--virtual-time-budget=3000`).
 

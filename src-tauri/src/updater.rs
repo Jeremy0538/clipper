@@ -32,15 +32,22 @@ fn client() -> Result<reqwest::Client> {
 
 /// Newest release newer than this build, if any.
 pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
-    let resp = client()?
-        .get(format!("https://api.github.com/repos/{REPO}/releases?per_page=30"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await?;
+    // Stable users: GitHub's "latest" release, however many test builds came
+    // after it. Testers: the newest releases of any kind.
+    let url = if include_test_builds {
+        format!("https://api.github.com/repos/{REPO}/releases?per_page=50")
+    } else {
+        format!("https://api.github.com/repos/{REPO}/releases/latest")
+    };
+    let resp = client()?.get(url).header("Accept", "application/vnd.github+json").send().await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        if !include_test_builds {
+            return Ok(None); // no stable release yet
+        }
         bail!("Update server not reachable (the release page is not public)");
     }
-    let releases: serde_json::Value = serde_json::from_slice(&resp.error_for_status()?.bytes().await?)?;
+    let body: serde_json::Value = serde_json::from_slice(&resp.error_for_status()?.bytes().await?)?;
+    let releases = if body.is_array() { body } else { serde_json::Value::Array(vec![body]) };
     let mine = current();
     let mut best: Option<(semver::Version, Update)> = None;
     for r in releases.as_array().into_iter().flatten() {
