@@ -4,6 +4,8 @@
 # The in-app updater offers any release tagged vX.Y.Z newer than the running build
 # (pre-releases only when "Include test builds" is on).
 set -euo pipefail
+# rustup (Windows target) may live in ~/.cargo instead of the system Rust.
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 cd "$(dirname "$0")/.."
 ver=${1:?version}; notes=${2:?notes}; flag=--prerelease
 [[ ${3:-} == --stable ]] && flag=--latest
