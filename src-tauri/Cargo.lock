@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "clipper"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
