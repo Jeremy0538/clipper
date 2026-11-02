@@ -234,10 +234,15 @@ pub async fn export(
     }
     let part = out.with_extension("part.mp4");
 
-    let attempt = |encoder: &'static str| {
+    // `on_gpu`: NVIDIA fit-to-size keeps every frame on the graphics card (CUDA
+    // decode → scale_cuda → NVENC). Copying 3440×1440 frames to the CPU and back
+    // made a 60 s clip take ~50 s.
+    let attempt = |encoder: &'static str, on_gpu: bool| {
         let mut c = command(&tools.ffmpeg);
         c.args(["-hide_banner", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]);
-        if reencode {
+        if on_gpu {
+            c.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+        } else if reencode {
             // GPU decoding for what gets re-encoded (falls back to CPU by itself).
             c.args(["-hwaccel", "auto"]);
         }
@@ -270,15 +275,15 @@ pub async fn export(
             }
         }
         if let Some(h) = max_h {
-            c.args(["-vf", &format!("scale=-2:{h}")]);
+            c.args(["-vf", &if on_gpu { format!("scale_cuda=-2:{h}") } else { format!("scale=-2:{h}") }]);
         }
         if let Some(k) = fit_kbps {
             let (b, buf) = (format!("{k}k"), format!("{}k", k * 2));
             match encoder {
-                "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+                "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
                 "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
                 "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
-                _ => c.args(["-c:v", "libx264", "-preset", "medium", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
+                _ => c.args(["-c:v", "libx264", "-preset", "veryfast", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
             };
         } else {
         match (trimmed, encoder) {
@@ -289,7 +294,9 @@ pub async fn export(
             (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]); }
         }
         }
-        c.args(["-pix_fmt", "yuv420p"]);
+        if !on_gpu {
+            c.args(["-pix_fmt", "yuv420p"]);
+        }
         if !keep.is_empty() {
             let ab = if fit_kbps.is_some() { "128k" } else { "192k" };
             c.args(["-c:a:0", "aac", "-b:a:0", ab, "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
@@ -313,9 +320,17 @@ pub async fn export(
 
     let mut last_err = None;
     let gpu = crate::gpu::detect().ffmpeg_encoder();
-    let encoders: Vec<&'static str> = if gpu == "libx264" { vec!["libx264"] } else { vec![gpu, "libx264"] };
-    for encoder in encoders {
-        let mut child = attempt(encoder).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut encoders: Vec<(&'static str, bool)> = vec![];
+    if gpu == "h264_nvenc" && fit_kbps.is_some() {
+        encoders.push((gpu, true));
+    }
+    if gpu != "libx264" {
+        encoders.push((gpu, false));
+    }
+    encoders.push(("libx264", false));
+    for (encoder, on_gpu) in encoders {
+        let t0 = std::time::Instant::now();
+        let mut child = attempt(encoder, on_gpu).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let stdout = child.stdout.take().unwrap();
         let mut lines = BufReader::new(stdout).lines();
         while let Some(l) = lines.next_line().await? {
@@ -325,12 +340,13 @@ pub async fn export(
         }
         let output = child.wait_with_output().await?;
         if output.status.success() {
+            crate::clog!("export: {encoder}{} {:.1} s for {length:.1} s of video", if on_gpu { " (all on GPU)" } else { "" }, t0.elapsed().as_secs_f64());
             std::fs::rename(&part, &out)?;
             progress(100);
             return Ok(out);
         }
         let err = String::from_utf8_lossy(&output.stderr).lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-        crate::clog!("export with {encoder} failed: {err}");
+        crate::clog!("export with {encoder}{} failed: {err}", if on_gpu { " (all on GPU)" } else { "" });
         let _ = std::fs::remove_file(&part);
         last_err = Some(err);
         if !reencode {

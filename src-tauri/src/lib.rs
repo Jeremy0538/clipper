@@ -679,13 +679,24 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
     let is_image = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("jpg"));
     let (file, kind) = match max_mb {
         Some(mb) if size_mb > mb * 0.97 && !is_image => {
+            // Same clip (path, size, time) + same limit = the copy made before.
+            let data = st.obs.data_dir.clone();
+            let out_dir = data.join("share");
+            let cached = out_dir.join(share_name(&p, mb));
+            if cached.is_file() {
+                clog!("share: reusing {}", cached.display());
+                let _ = std::fs::File::options().append(true).open(&cached)
+                    .and_then(|f| f.set_modified(std::time::SystemTime::now())); // keep it another day
+                tauri::async_runtime::spawn_blocking(move || clips::copy_file(&cached))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                return Ok("reused".into());
+            }
             let tools = tools_for(&app).await?;
             clog!("share: fitting {} ({size_mb:.1} MB) into {mb} MB", p.display());
-            let data = st.obs.data_dir.clone();
             let info = editor::open(&tools, &data.join("share-cache"), &p)
                 .await
                 .map_err(|e| format!("Could not read the clip: {e:#}"))?;
-            let out_dir = data.join("share");
             std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
             let req = editor::ExportRequest {
                 path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(mb),
@@ -695,8 +706,9 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
                 .await
                 .map_err(|e| { clog!("ERROR share export: {e:#}"); format!("Could not make it smaller: {e:#}") })?;
             let _ = std::fs::remove_dir_all(data.join("share-cache"));
-            clog!("share: fitted to {:.1} MB", std::fs::metadata(&out).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
-            (out, "fitted")
+            std::fs::rename(&out, &cached).map_err(|e| e.to_string())?;
+            clog!("share: fitted to {:.1} MB", std::fs::metadata(&cached).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
+            (cached, "fitted")
         }
         _ => (p, "original"),
     };
@@ -704,6 +716,19 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
         .await
         .map_err(|e| e.to_string())??;
     Ok(kind.into())
+}
+
+/// File name of the fitted copy of `clip` for `mb`: readable (it is what Discord
+/// shows) plus a short hash of path, size, modified time and limit.
+fn share_name(clip: &std::path::Path, mb: f64) -> String {
+    use sha2::{Digest, Sha256};
+    let md = std::fs::metadata(clip).ok();
+    let stamp = md.as_ref().and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+    let key = format!("{}|{}|{stamp}|{mb}", clip.display(), md.map(|m| m.len()).unwrap_or(0));
+    let hash: String = Sha256::digest(key.as_bytes()).iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let stem = clip.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "clip".into());
+    format!("{stem} (Discord {mb} MB) {hash}.mp4")
 }
 
 /// Fitted share copies older than a day (the clipboard has long moved on).

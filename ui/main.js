@@ -275,11 +275,11 @@ async function shareClip(btn, c, mb) {
   btn.disabled = true;
   const needsFit = mb !== null && c.size > mb * 1e6 * 0.97;
   btn.textContent = needsFit ? "Preparing…" : "Copying…";
-  if (needsFit) say("Making it fit for Discord… you can keep using Clipper.");
+  if (needsFit) say("Getting it ready for Discord… you can keep using Clipper.");
   const un = await listen("share-progress", (e) => { btn.textContent = `Preparing ${e.payload}%`; });
   try {
-    await invoke("share_clip", { path: c.path, maxMb: mb });
-    say("Copied! Paste it in Discord with Ctrl+V.");
+    const how = await invoke("share_clip", { path: c.path, maxMb: mb });
+    say(how === "reused" ? "Copied (already prepared earlier)! Paste it in Discord with Ctrl+V." : "Copied! Paste it in Discord with Ctrl+V.");
     btn.textContent = "Copied ✓";
     setTimeout(() => { btn.textContent = text; }, 2500);
   } catch (err) {
