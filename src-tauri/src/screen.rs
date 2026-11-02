@@ -80,7 +80,7 @@ fn pick<'a>(monitors: &'a [Monitor], choice: &str) -> Vec<&'a Monitor> {
 /// Build the Screen scene for `choice` and switch to it. Returns the canvas size
 /// it needs; the caller changes the video settings (only allowed while no
 /// output runs).
-pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str], cam: &crate::settings::WebcamSettings) -> Result<(u32, u32)> {
+pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str]) -> Result<(u32, u32)> {
     let monitors = list_monitors(obs).await?;
     let mut chosen = pick(&monitors, choice);
     if chosen.is_empty() {
@@ -149,9 +149,6 @@ pub async fn prepare(obs: &ObsClient, choice: &str, audio_inputs: &[&str], cam: 
     // The same audio sources as in the game scene.
     for a in audio_inputs {
         let _ = obs.call("CreateSceneItem", json!({ "sceneName": SCREEN_SCENE, "sourceName": a })).await;
-    }
-    if cam.enabled && obs.call("CreateSceneItem", json!({ "sceneName": SCREEN_SCENE, "sourceName": setup::WEBCAM })).await.is_ok() {
-        let _ = setup::place_webcam(obs, SCREEN_SCENE, w, h, cam).await;
     }
     Ok((w, h))
 }

@@ -132,14 +132,12 @@ impl ObsManager {
         // The websocket opens before OBS has finished loading ("not ready",
         // code 207): keep trying. If it never works, restart OBS rather than
         // leaving a half-set-up one running.
-        let mut specs = setup::specs(&self.data_dir, &settings.audio);
-        specs.extend(setup::webcam_spec(&settings.webcam));
+        let specs = setup::specs(&self.data_dir, &settings.audio);
         let t0 = Instant::now();
         loop {
             match setup::ensure_scene(&self.client, &specs, settings.width, settings.height).await {
                 Ok(()) => {
                     let _ = setup::set_track_names(&self.client, &settings.audio).await;
-                    let _ = setup::place_webcam(&self.client, config::SCENE, settings.width, settings.height, &settings.webcam).await;
                     // Always come up in game mode (OBS may remember the Screen scene).
                     let _ = self.client.call("SetCurrentProgramScene", serde_json::json!({ "sceneName": config::SCENE })).await;
                     break;
@@ -198,10 +196,8 @@ impl ObsManager {
     /// Re-apply the audio part of the scene (after a settings change).
     pub async fn apply_audio(&self) -> Result<()> {
         let s = self.settings.lock().unwrap().clone();
-        let mut specs = setup::specs(&self.data_dir, &s.audio);
-        specs.extend(setup::webcam_spec(&s.webcam));
+        let specs = setup::specs(&self.data_dir, &s.audio);
         setup::ensure_scene(&self.client, &specs, s.width, s.height).await?;
-        setup::place_webcam(&self.client, config::SCENE, s.width, s.height, &s.webcam).await?;
         setup::set_track_names(&self.client, &s.audio).await
     }
 

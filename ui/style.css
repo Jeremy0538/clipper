@@ -181,3 +181,9 @@ button.link { background:transparent; border-color:transparent; color:var(--dim)
 kbd { font:600 12px "Segoe UI", system-ui, sans-serif; border:1px solid var(--ctl-border); border-bottom-width:2px; border-radius:4px; padding:1px 6px; background:var(--ctl); }
 .keybtn.listening { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
 .step .row > span:first-child { flex-basis:210px; }
+#su-test-video { width:100%; max-height:40vh; background:#000; border-radius:8px; margin-top:10px; display:block; }
+#su-test-video.hidden { display:none; }
+#report-text, #report-token { background:var(--ctl); color:var(--fg); border:1px solid var(--ctl-border); border-radius:6px; padding:6px 8px; font:inherit; }
+#report-text { width:100%; box-sizing:border-box; resize:vertical; margin:6px 0; }
+#report-token { flex:1; min-width:0; }
+#report-status { color:var(--dim); font-size:12.5px; }

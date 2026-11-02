@@ -24,6 +24,7 @@ async function setupClose() {
 }
 
 function suShow() {
+  $("su-test-video").pause();
   su.steps.forEach((s, i) => s.classList.toggle("hidden", i !== su.step));
   [...$("setup-steps").children].forEach((li, i) => {
     li.classList.toggle("done", i < su.step);
@@ -59,8 +60,6 @@ function suFill() {
   $("su-noise").checked = a.mic_noise_suppression;
   radio("su-q", settings.quality);
   $("su-storage").value = String(settings.storage_limit_gb);
-  $("su-cam").checked = settings.webcam.enabled;
-  $("su-cam-position").value = settings.webcam.position;
   $("su-autostart").checked = settings.autostart;
   $("su-sound").checked = settings.sound;
   const enc = $("su-encoder");
@@ -81,7 +80,6 @@ function suSync() {
   const gm = document.querySelector('input[name="su-gm"]:checked')?.value;
   $("su-row-desktop").classList.toggle("hidden", gm !== "desktop");
   document.querySelector(".su-mic-on").classList.toggle("hidden", !$("su-mic").checked);
-  document.querySelector(".su-cam-on").classList.toggle("hidden", !$("su-cam").checked);
 }
 
 // Device lists need OBS; until it's ready, say so instead of showing empty lists.
@@ -95,7 +93,7 @@ async function suReady() {
     : "Getting the recorder ready…";
   $("su-find-mic").disabled = $("su-level-mic").disabled = !ready || su.busy;
   if (!ready) {
-    for (const id of ["su-mic-device", "su-desktop-device", "su-cam-device", "su-screen"]) {
+    for (const id of ["su-mic-device", "su-desktop-device", "su-screen"]) {
       const sel = $(id);
       if (!sel.options.length) sel.replaceChildren(new Option("Waiting for the recorder…", ""));
     }
@@ -107,9 +105,6 @@ async function suReady() {
     const [ins, outs] = [await invoke("list_audio_devices", { output: false }), await invoke("list_audio_devices", { output: true })];
     suDevices("su-mic-device", ins, settings.audio.mic_device);
     suDevices("su-desktop-device", outs, settings.audio.desktop_device);
-    const cams = await invoke("list_cameras");
-    $("su-cam-device").replaceChildren(...(cams.length ? cams.map((c) => new Option(c.name, c.id)) : [new Option("No camera found", "")]));
-    if (settings.webcam.device) $("su-cam-device").value = settings.webcam.device;
     const mons = await invoke("list_monitors");
     $("su-screen").replaceChildren(new Option("Main screen", "primary"), new Option("All screens together", "all"),
       ...mons.map((m) => new Option(`${m.name.split(":")[0]} (${m.w}×${m.h})`, m.id)));
@@ -146,12 +141,6 @@ for (const r of document.querySelectorAll('input[name="su-q"]')) {
   r.onchange = () => suSave(invoke("set_quality", { quality: r.value }).then(() => { settings.quality = r.value; $("quality").value = r.value; }));
 }
 $("su-storage").onchange = (e) => suSave(invoke("set_storage_limit", { gb: +e.target.value }).then(() => { settings.storage_limit_gb = +e.target.value; }));
-function suCam() {
-  suSync();
-  settings.webcam = { ...settings.webcam, enabled: $("su-cam").checked, device: $("su-cam-device").value, position: $("su-cam-position").value };
-  suSave(invoke("set_webcam", { webcam: settings.webcam }));
-}
-for (const id of ["su-cam", "su-cam-device", "su-cam-position"]) $(id).onchange = suCam;
 $("su-screen").onchange = (e) => suSave(invoke("set_screen_monitor", { monitor: e.target.value }).then(() => { settings.screen_monitor = e.target.value; }));
 for (const name of ["autostart", "sound"]) {
   $("su-" + name).onchange = (e) => suSave(invoke("set_option", { name, value: e.target.checked }).then(() => { settings[name] = e.target.checked; }));
@@ -216,6 +205,60 @@ $("su-level-mic").onclick = async () => {
     }
   } catch (err) { micMsg("Something went wrong: " + err); }
   busy(false);
+};
+
+// ---------- test clip ----------
+// Clip ~10 s of whatever runs now (the game, else the screen) and play it back here.
+function testMsg(t) { $("su-test-msg").classList.remove("hidden"); $("su-test-msg").textContent = t; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The path of the next saved clip, or null after `ms`.
+function nextClip(ms) {
+  return new Promise(async (resolve) => {
+    let done = false;
+    const un = await listen("clip-saved", (e) => { if (!done) { done = true; un(); resolve(e.payload); } });
+    setTimeout(() => { if (!done) { done = true; un(); resolve(null); } }, ms);
+  });
+}
+
+$("su-test").onclick = async () => {
+  if (status.obs !== "ready") return testMsg("The recorder isn't ready yet. Wait a moment and try again.");
+  if (status.recording) return testMsg("A recording is running. Stop it first.");
+  const btn = $("su-test");
+  btn.disabled = true;
+  $("su-test-video").pause();
+  $("su-test-video").classList.add("hidden");
+  $("su-test-after").classList.add("hidden");
+  const startedHere = !status.buffer;
+  uiLog(`setup test clip: start (game: ${status.game || "none"}, buffer was ${status.buffer ? "on" : "off"})`);
+  try {
+    if (startedHere) {
+      testMsg("Starting…");
+      await invoke("start_buffer");
+    }
+    for (let s = 10; s > 0; s--) {
+      testMsg(`Recording ${status.game ? status.game : "your screen"}… talk and make some sound. ${s}`);
+      await sleep(1000);
+    }
+    testMsg("Saving…");
+    const saved = nextClip(20000);
+    await invoke("save_clip");
+    const path = await saved;
+    if (!path) throw "the clip was not saved in time. Use \"Report a problem\" in Settings so the log can be checked.";
+    uiLog(`setup test clip: saved ${path}`);
+    const v = $("su-test-video");
+    v.src = convertFileSrc(path);
+    v.classList.remove("hidden");
+    v.play().catch(() => {});
+    $("su-test-after").classList.remove("hidden");
+    testMsg("Here it is. Do you see the picture and hear the game, Discord and your voice?");
+  } catch (err) {
+    uiLog(`setup test clip failed: ${err}`);
+    testMsg("The test clip failed: " + err);
+  } finally {
+    if (startedHere) await invoke("stop_buffer").catch(() => {});
+    btn.disabled = false;
+  }
 };
 
 // ---------- open on the first start ----------

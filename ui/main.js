@@ -15,7 +15,7 @@ for (const tab of document.querySelectorAll(".tab")) {
     if (ed.info) closeEditor();
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t === tab));
     document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + tab.dataset.view));
-    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); loadMonitors(); loadCameras(); }
+    if (tab.dataset.view === "settings") { loadDevices(); loadGames(); loadMonitors(); }
     meters(tab.dataset.view === "settings");
   };
 }
@@ -216,6 +216,7 @@ let listening = false;
 async function loadSettings() {
   settings = await invoke("get_settings");
   syncKeyLabels();
+  reportSync();
   const sl = $("storage-limit");
   if (![...sl.options].some((o) => +o.value === settings.storage_limit_gb)) sl.add(new Option(settings.storage_limit_gb + " GB", settings.storage_limit_gb));
   sl.value = String(settings.storage_limit_gb);
@@ -275,6 +276,37 @@ for (const name of ["sound", "toast", "autostart", "test_builds"]) {
   $("opt-" + name).onchange = (e) => invoke("set_option", { name, value: e.target.checked }).catch(say);
 }
 $("logs").onclick = () => invoke("open_log_folder").catch(say);
+
+// ---------- report a problem ----------
+function reportSync() {
+  $("report-token").placeholder = settings?.report_ready ? "Token saved (paste a new one to replace it)" : "Paste your API token";
+}
+$("report-token-save").onclick = async () => {
+  const btn = $("report-token-save");
+  btn.disabled = true;
+  try {
+    await invoke("set_report_token", { token: $("report-token").value });
+    settings.report_ready = !!$("report-token").value.trim();
+    $("report-token").value = "";
+    reportSync();
+    say(settings.report_ready ? "Todoist token saved." : "Todoist token removed.");
+  } catch (err) { say(err); }
+  btn.disabled = false;
+};
+$("report-send").onclick = async () => {
+  const text = $("report-text").value.trim();
+  if (!text) return say("Describe the problem first.");
+  if (!settings.report_ready) return say("Paste your Todoist token below first.");
+  const btn = $("report-send");
+  btn.disabled = true;
+  $("report-status").textContent = "Sending…";
+  try {
+    await invoke("report_problem", { text });
+    $("report-text").value = "";
+    $("report-status").textContent = "Sent to your Todoist Inbox, with the logs.";
+  } catch (err) { $("report-status").textContent = "Not sent: " + err; }
+  btn.disabled = false;
+};
 
 // ---------- window frame ----------
 const win = window.__TAURI__.window.getCurrentWindow();
@@ -406,38 +438,6 @@ $("add-game").onclick = async () => {
   catch (err) { say(err); }
 };
 
-// ---------- webcam ----------
-async function loadCameras() {
-  if (!settings) return;
-  const w = settings.webcam, sel = $("cam-device");
-  $("cam-enabled").checked = w.enabled;
-  $("cam-position").value = w.position;
-  $("cam-size").value = w.size;
-  $("cam-size").nextElementSibling.textContent = w.size + "%";
-  try {
-    const cams = status.obs === "ready" ? await invoke("list_cameras") : [];
-    sel.replaceChildren(...cams.map((c) => new Option(c.name, c.id)));
-    if (!cams.length) sel.replaceChildren(new Option("No camera found", ""));
-  } catch (err) { say(err); }
-  if (w.device && ![...sel.options].some((o) => o.value === w.device)) sel.add(new Option(w.device, w.device));
-  if (w.device) sel.value = w.device;
-  syncCam();
-}
-function syncCam() {
-  for (const id of ["cam-device", "cam-position", "cam-size"]) $(id).disabled = !$("cam-enabled").checked;
-}
-let camTimer;
-function saveCam() {
-  settings.webcam = {
-    enabled: $("cam-enabled").checked, device: $("cam-device").value,
-    position: $("cam-position").value, size: +$("cam-size").value,
-  };
-  syncCam();
-  clearTimeout(camTimer);
-  camTimer = setTimeout(() => invoke("set_webcam", { webcam: settings.webcam }).then(() => say("Webcam saved."), say), 250);
-}
-for (const id of ["cam-enabled", "cam-device", "cam-position"]) $(id).onchange = saveCam;
-$("cam-size").oninput = (e) => { e.target.nextElementSibling.textContent = e.target.value + "%"; saveCam(); };
 
 // ---------- level meters ----------
 listen("meters", (e) => {

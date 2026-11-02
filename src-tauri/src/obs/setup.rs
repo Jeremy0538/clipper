@@ -3,7 +3,7 @@
 //! Re-run whenever the audio settings change; it adds, updates and removes inputs.
 
 use super::{config::SCENE, ws::ObsClient};
-use crate::settings::{AudioSettings, GameAudioMode, WebcamSettings};
+use crate::settings::{AudioSettings, GameAudioMode};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -16,9 +16,11 @@ pub const GAME_AUDIO: &str = "Game Audio";
 pub const DISCORD: &str = "Discord";
 pub const MIC: &str = "Mic";
 pub const APP_INPUTS: [&str; 2] = ["App 1", "App 2"];
-pub const WEBCAM: &str = "Webcam";
+/// The webcam overlay was removed in 0.3.1 (OBS held the camera, so Discord
+/// couldn't use it). Still removed here so an older install lets go of it.
+const OLD_WEBCAM: &str = "Webcam";
 /// Inputs we own that come and go with the settings: removed when switched off.
-const MANAGED_AUDIO: [&str; 6] = [GAME_AUDIO, DISCORD, MIC, APP_INPUTS[0], APP_INPUTS[1], WEBCAM];
+const MANAGED_AUDIO: [&str; 6] = [GAME_AUDIO, DISCORD, MIC, APP_INPUTS[0], APP_INPUTS[1], OLD_WEBCAM];
 const NOISE_FILTER: &str = "Noise Suppression";
 const BOOST_FILTER: &str = "Boost";
 const LIMITER_FILTER: &str = "Limiter";
@@ -248,79 +250,6 @@ pub fn ensure_dev_media(dev_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The webcam input (added after the captures, so it is drawn on top).
-pub fn webcam_spec(w: &WebcamSettings) -> Option<InputSpec> {
-    if !w.enabled {
-        return None;
-    }
-    let (kind, settings) = if cfg!(windows) {
-        ("dshow_input", json!({ "video_device_id": w.device, "active": true,
-                                "deactivate_when_not_showing": false, "res_type": 0 }))
-    } else {
-        // Development: a coloured block, never the real camera.
-        ("color_source_v3", json!({ "width": 640, "height": 360, "color": 4289374890u32 }))
-    };
-    Some(InputSpec { name: WEBCAM, kind, settings, tracks: &[], fit: false, volume: 1.0, filters: vec![] })
-}
-
-/// Size + corner of the webcam in `scene` (canvas w×h). No-op without a webcam.
-pub async fn place_webcam(obs: &ObsClient, scene: &str, w: u32, h: u32, cam: &WebcamSettings) -> Result<()> {
-    if !cam.enabled {
-        return Ok(());
-    }
-    let Ok(id) = obs.call("GetSceneItemId", json!({ "sceneName": scene, "sourceName": WEBCAM })).await else {
-        return Ok(());
-    };
-    let id = id["sceneItemId"].clone();
-    let bw = w as f64 * cam.size.clamp(10, 40) as f64 / 100.0;
-    let bh = bw * 9.0 / 16.0;
-    let m = (w.min(h) as f64 * 0.02).round();
-    let (x, y) = match cam.position.as_str() {
-        "top-left" => (m, m),
-        "top-right" => (w as f64 - bw - m, m),
-        "bottom-left" => (m, h as f64 - bh - m),
-        _ => (w as f64 - bw - m, h as f64 - bh - m),
-    };
-    obs.call("SetSceneItemTransform", json!({
-        "sceneName": scene, "sceneItemId": id,
-        "sceneItemTransform": {
-            "positionX": x, "positionY": y, "alignment": 5,
-            "boundsType": "OBS_BOUNDS_SCALE_INNER", "boundsAlignment": 0, "boundsWidth": bw, "boundsHeight": bh,
-        },
-    }))
-    .await?;
-    // On top of everything else in this scene.
-    let n = obs.call("GetSceneItemList", json!({ "sceneName": scene })).await?["sceneItems"]
-        .as_array().map(|a| a.len()).unwrap_or(1);
-    obs.call("SetSceneItemIndex", json!({ "sceneName": scene, "sceneItemId": id, "sceneItemIndex": n.saturating_sub(1) })).await?;
-    Ok(())
-}
-
-/// Cameras OBS can use (Windows); a stand-in on Linux.
-pub async fn list_cameras(obs: &ObsClient) -> Result<Vec<Device>> {
-    if !cfg!(windows) {
-        return Ok(vec![Device { id: "dev-cam".into(), name: "Test camera (colour block)".into() }]);
-    }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let name = format!("_probe_camera_{stamp}");
-    obs.call("CreateInput", json!({
-        "sceneName": SCENE, "inputName": name, "inputKind": "dshow_input",
-        "inputSettings": { "active": false }, "sceneItemEnabled": false,
-    }))
-    .await?;
-    let items = obs
-        .call("GetInputPropertiesListPropertyItems", json!({ "inputName": name, "propertyName": "video_device_id" }))
-        .await;
-    let _ = obs.call("RemoveInput", json!({ "inputName": name })).await;
-    Ok(items?["propertyItems"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|i| Some(Device { id: i["itemValue"].as_str()?.to_string(), name: i["itemName"].as_str()?.to_string() }))
-        .filter(|d| !d.id.is_empty())
-        .collect())
-}
-
 pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) -> Result<()> {
     let list = obs.call("GetInputList", json!({})).await?;
     let existing: HashMap<String, String> = list["inputs"]
@@ -356,12 +285,6 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
             }
         }
 
-        // The camera's own microphone stays out of every track.
-        if spec.name == WEBCAM {
-            let none: serde_json::Map<String, Value> = (1..=6u8).map(|t| (t.to_string(), false.into())).collect();
-            let _ = obs.call("SetInputAudioTracks", json!({ "inputName": WEBCAM, "inputAudioTracks": none })).await;
-            let _ = obs.call("SetInputMute", json!({ "inputName": WEBCAM, "inputMuted": true })).await;
-        }
         // Media stand-ins carry audio even when no track is wanted: set all six.
         let tracks: serde_json::Map<String, Value> =
             (1..=6u8).map(|t| (t.to_string(), spec.tracks.contains(&t).into())).collect();

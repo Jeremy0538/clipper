@@ -11,6 +11,7 @@ mod log;
 mod modes;
 mod screen;
 mod notify;
+mod report;
 mod obs;
 mod settings;
 mod updater;
@@ -289,8 +290,9 @@ struct SettingsView {
     quality: String,
     version: String,
     audio: AudioSettings,
-    webcam: settings::WebcamSettings,
     setup_done: bool,
+    /// A Todoist token is stored, so "Report a problem" can send.
+    report_ready: bool,
     /// Which chip encodes, e.g. "NVIDIA (NVENC)".
     encoder: String,
     gpu_encoding: bool,
@@ -325,8 +327,8 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<SettingsView,
         quality: u.quality.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         audio: u.audio.clone(),
-        webcam: u.webcam.clone(),
         setup_done: u.setup_done,
+        report_ready: report::token(&state.obs.data_dir).is_some(),
         encoder: if state.obs.settings.lock().unwrap().force_cpu { gpu::Vendor::Cpu } else { gpu::detect() }.label().into(),
         gpu_encoding: !state.obs.settings.lock().unwrap().force_cpu && gpu::detect() != gpu::Vendor::Cpu,
     })
@@ -452,36 +454,6 @@ async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> R
         state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
         // Make the game detector point Game Audio at the game again.
         state.obs_session.fetch_add(1, Ordering::SeqCst);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn list_cameras(state: tauri::State<'_, AppState>) -> Result<Vec<obs::setup::Device>, String> {
-    obs::setup::list_cameras(&state.obs.client).await.map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-async fn set_webcam(app: AppHandle, webcam: settings::WebcamSettings) -> Result<(), String> {
-    let st = app.state::<AppState>();
-    {
-        let mut u = st.user.lock().await;
-        u.webcam = webcam.clone();
-        u.save(&st.settings_file).map_err(|e| e.to_string())?;
-    }
-    clog!("webcam: {webcam:?}");
-    st.obs.settings.lock().unwrap().webcam = webcam;
-    if !st.obs.client.is_connected().await {
-        return Ok(());
-    }
-    st.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
-    // Screen mode: rebuild that scene too so the camera shows up / moves there.
-    if st.screen.load(Ordering::SeqCst) {
-        let cam = st.obs.settings.lock().unwrap().webcam.clone();
-        let canvas = st.obs.client.call("GetVideoSettings", json!({})).await.map_err(|e| e.to_string())?;
-        let (w, h) = (canvas["baseWidth"].as_u64().unwrap_or(1920) as u32, canvas["baseHeight"].as_u64().unwrap_or(1080) as u32);
-        let _ = st.obs.client.call("CreateSceneItem", json!({ "sceneName": screen::SCREEN_SCENE, "sourceName": obs::setup::WEBCAM })).await;
-        let _ = obs::setup::place_webcam(&st.obs.client, screen::SCREEN_SCENE, w, h, &cam).await;
     }
     Ok(())
 }
@@ -622,6 +594,43 @@ fn set_frame_color(app: AppHandle, color: String) -> bool {
         let _ = (app, color);
         false
     }
+}
+
+/// Store (after checking) or remove ("") the Todoist token for problem reports.
+#[tauri::command]
+async fn set_report_token(state: tauri::State<'_, AppState>, token: String) -> Result<(), String> {
+    report::set_token(&state.obs.data_dir, &token).await.map_err(|e| format!("{e:#}"))?;
+    clog!("report token {}", if token.trim().is_empty() { "removed" } else { "saved" });
+    Ok(())
+}
+
+/// Send the user's description with the logs to their Todoist Inbox. Returns the task link.
+#[tauri::command]
+async fn report_problem(state: tauri::State<'_, AppState>, text: String) -> Result<String, String> {
+    clog!("problem report: {}", text.chars().take(300).collect::<String>().replace('\n', " / "));
+    let summary = {
+        let u = state.user.lock().await;
+        let s = state.status.lock().await;
+        let obs = state.obs.settings.lock().unwrap().clone();
+        format!(
+            "---\nVersion {} · {} · {}\nStatus: OBS {} · clipping {} · recording {} · screen mode {} · game {}\n\
+             Quality {} ({}x{}, encoder {}{}) · buffer {} s · screen {}\nAudio: {}\nAdded apps: {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            s.obs, s.buffer, s.recording, s.screen, s.game.as_deref().unwrap_or("none"),
+            u.quality, obs.width, obs.height, gpu::detect().label(), if obs.force_cpu { ", forced CPU" } else { "" },
+            u.buffer_secs, u.screen_monitor,
+            serde_json::to_string(&u.audio).unwrap_or_default(),
+            u.custom_games.iter().map(|g| g.name.as_str()).collect::<Vec<_>>().join(", "),
+        )
+    };
+    let url = report::send(&state.obs.data_dir, &text, &summary).await.map_err(|e| {
+        clog!("problem report failed: {e:#}");
+        format!("{e:#}")
+    })?;
+    clog!("problem report sent");
+    Ok(url)
 }
 
 #[tauri::command]
@@ -900,7 +909,8 @@ pub fn run() {
             delete_clip, copy_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
             editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
-            screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, list_cameras, set_webcam, finish_setup
+            screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
+            set_report_token, report_problem
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -931,7 +941,6 @@ pub fn run() {
             let mut settings = Settings {
                 buffer_secs: user.buffer_secs,
                 audio: user.audio.clone(),
-                webcam: user.webcam.clone(),
                 quality: user.quality.clone(),
                 ..Settings::default()
             };

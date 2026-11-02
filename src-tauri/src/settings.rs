@@ -23,7 +23,6 @@ pub struct UserSettings {
     /// Small corner pop-ups (clip saved, game detected, errors) — debug aid.
     pub toast: bool,
     pub audio: AudioSettings,
-    pub webcam: WebcamSettings,
     /// Games the user switched off: no buffer while they run.
     pub disabled_games: Vec<String>,
     /// Apps the user added as clip applications (treated like games).
@@ -40,25 +39,6 @@ pub struct UserSettings {
     pub quality: String,
     /// The first-start setup guide was finished (or skipped).
     pub setup_done: bool,
-}
-
-/// Webcam picture-in-picture on clips and recordings.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct WebcamSettings {
-    pub enabled: bool,
-    /// OBS video_device_id ("" = first camera).
-    pub device: String,
-    /// "top-left" | "top-right" | "bottom-left" | "bottom-right"
-    pub position: String,
-    /// Width as a percentage of the picture (10..=40).
-    pub size: u32,
-}
-
-impl Default for WebcamSettings {
-    fn default() -> Self {
-        Self { enabled: false, device: String::new(), position: "bottom-right".into(), size: 22 }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -115,7 +95,7 @@ impl Default for AudioSettings {
 
 impl Default for UserSettings {
     fn default() -> Self {
-        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), webcam: WebcamSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: true, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false }
+        Self { hotkey: Hotkey::default(), record_hotkey: Hotkey::default_record(), screenshot_hotkey: Hotkey::default_screenshot(), storage_limit_gb: 0.0, buffer_secs: 120, sound: true, toast: true, audio: AudioSettings::default(), disabled_games: vec![], custom_games: vec![], autostart: true, test_builds: true, theme: "system".into(), screen_monitor: "primary".into(), quality: "balanced".into(), setup_done: false }
     }
 }
 

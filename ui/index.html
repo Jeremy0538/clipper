@@ -158,22 +158,25 @@
 
       <section class="step" data-title="Extras">
         <h2>Extras <span class="hint">all optional</span></h2>
-        <h3>Webcam</h3>
-        <div class="row"><span>Show my webcam in clips</span><input type="checkbox" id="su-cam"></div>
-        <div class="su-cam-on">
-          <div class="row"><span>Camera</span><select id="su-cam-device"></select></div>
-          <div class="row"><span>Corner</span>
-            <select id="su-cam-position">
-              <option value="top-left">Top left</option><option value="top-right">Top right</option>
-              <option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option>
-            </select></div>
-        </div>
         <h3>Screen recording</h3>
         <p class="hint">Without a game, Record and Start clipping capture your screen instead.</p>
         <div class="row"><span>Screen to record</span><select id="su-screen"></select></div>
         <h3>Other</h3>
         <div class="row"><span>Start with Windows (in the tray)</span><input type="checkbox" id="su-autostart"></div>
         <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="su-sound"></div>
+      </section>
+
+      <section class="step" data-title="Try it">
+        <h2>Make a test clip</h2>
+        <p>Check that everything works before you need it. For the best test, start your game first: Clipper then records it like it normally will. Without a game it records your screen, and "Only the game" sound stays silent.</p>
+        <p class="hint">During the test: talk, play some game sound, and if you're in a Discord call, let a friend say something.</p>
+        <div class="row"><span>Game sound</span><div class="meter" data-inputs="Game Audio"><i></i></div></div>
+        <div class="row"><span>Discord</span><div class="meter" data-inputs="Discord"><i></i></div></div>
+        <div class="row"><span>Microphone</span><div class="meter" data-inputs="Mic"><i></i></div></div>
+        <div class="row"><span></span><button id="su-test" class="primary">Make a test clip</button></div>
+        <div class="callout hidden" id="su-test-msg"></div>
+        <video id="su-test-video" class="hidden" controls></video>
+        <p class="hint hidden" id="su-test-after">Something missing? Go back to fix it, then try again. The test clip is under Clips, where the editor plays Game, Discord and Mic separately.</p>
       </section>
 
       <section class="step" data-title="Done">
@@ -272,19 +275,6 @@
     </section>
 
     <section class="card">
-      <h2>Webcam</h2>
-      <p class="hint">Show your webcam in a corner of every clip and recording.</p>
-      <div class="row"><span>Show webcam</span><input type="checkbox" id="cam-enabled"></div>
-      <div class="row"><span>Camera</span><select id="cam-device"></select></div>
-      <div class="row"><span>Position</span>
-        <select id="cam-position">
-          <option value="top-left">Top left</option><option value="top-right">Top right</option>
-          <option value="bottom-left">Bottom left</option><option value="bottom-right">Bottom right</option>
-        </select></div>
-      <div class="row"><span>Size</span><input type="range" id="cam-size" min="10" max="40" step="1"><output></output></div>
-    </section>
-
-    <section class="card">
       <h2>Notifications</h2>
       <div class="row"><span>Sound when a clip is saved</span><input type="checkbox" id="opt-sound"></div>
       <div class="row"><span>Debug pop-ups</span><input type="checkbox" id="opt-toast"></div>
@@ -317,6 +307,12 @@
     <section class="card">
       <h2>Troubleshooting</h2>
       <div class="row"><span>Log file and OBS logs</span><button id="logs">Open log folder</button></div>
+      <h3>Report a problem</h3>
+      <p class="hint">Describe what went wrong and when. Clipper adds its log and the OBS log and sends it all to your Todoist Inbox.</p>
+      <textarea id="report-text" rows="4" placeholder="What did you do, what happened, and roughly what time?"></textarea>
+      <div class="row"><span id="report-status"></span><button id="report-send" class="primary">Send report</button></div>
+      <div class="row"><span>Todoist token</span><input type="password" id="report-token" placeholder="Paste your API token" autocomplete="off"><button id="report-token-save">Save</button></div>
+      <p class="hint">Once: Todoist → Settings → Integrations → Developer → copy the API token. It stays on this PC.</p>
     </section>
   </main>
   <script src="main.js"></script>

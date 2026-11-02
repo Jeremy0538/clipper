@@ -14,6 +14,9 @@ UI text and commit messages in English.
 - Loop: change code → check that it compiles for Windows → bump the version and publish a
   pre-release → the owner updates in the app and tests → the owner reports back with symptoms and
   the log.
+- **Bug reports come with logs:** Settings → Troubleshooting → "Report a problem" creates a task in
+  the owner's Todoist Inbox (title `Clipper X.Y.Z: …`, status/settings summary in the description, the
+  end of clipper.log and of the newest OBS log as comments). Read those comments first.
 - Logs on Windows: `%APPDATA%\nl.jeremyklootwijk.clipper\clipper.log`
   (Settings → Troubleshooting → Open log folder). OBS logs are in `obs\config\obs-studio\logs\`
   in the same folder. Ask for the relevant lines when a bug report is vague.
@@ -56,7 +59,7 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `src-tauri/src/lib.rs` | App state, all `#[tauri::command]`s, tray, OBS event follower (`watch_events`), startup |
 | `obs/mod.rs` | `ObsManager`: writes config, spawns OBS, connects, scene setup with retry, supervisor restart, `shutdown()`, Windows job object (OBS dies with Clipper), removes OBS's tray icon |
 | `obs/config.rs` | Writes OBS user.ini/global.ini, profile basic.ini (encoder, tracks, replay buffer), websocket config (port 4466, random password in `<data>/obs-ws-password`) |
-| `obs/setup.rs` | Builds inputs/scene over websocket each start: Game Capture/Window Capture, Game Audio, Discord, Mic (+RNNoise, gain, limiter), apps, webcam. On Linux: looping test files instead |
+| `obs/setup.rs` | Builds inputs/scene over websocket each start: Game Capture/Window Capture, Game Audio, Discord, Mic (+RNNoise, gain, limiter), apps. On Linux: looping test files instead |
 | `obs/download.rs` | First-run download of pinned portable OBS (sha256-checked) into `<data>/obs` |
 | `obs/ws.rs` | Minimal obs-websocket v5 client |
 | `games.rs` | Steam library scan + Minecraft + user-added apps; picks the game window → OBS window string |
@@ -68,7 +71,8 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `gpu.rs` | DXGI vendor → OBS + ffmpeg encoder (NVENC/AMF/QSV/x264), CPU fallback |
 | `updater.rs`, `installer.rs`, `autostart.rs` | GitHub-release updater, self-install to `%LOCALAPPDATA%\Programs\Clipper` + uninstall, HKCU Run |
 | `settings.rs` | `settings.json` (serde defaults, so new fields are safe) |
-| `ui/main.js` | Clips, Settings, status. `ui/editor.js` editor. `ui/setup.js` first-start setup guide (shown while `setup_done` is false) |
+| `report.rs` | "Report a problem" → Todoist API v1 with the user's own token (`<data>/todoist-token`, never in the repo) |
+| `ui/main.js` | Clips, Settings, status. `ui/editor.js` editor. `ui/setup.js` first-start setup guide (shown while `setup_done` is false), ending with a 10 s test clip |
 
 Audio tracks: 1 Mix, 2 Game, 3 Discord, 4 Mic, 5/6 extra apps. OBS writes track names as the
 stream tag `name`.
@@ -92,8 +96,9 @@ stream tag `name`.
 - Explorer `/select,` needs a raw arg: `/select,"path"`.
 - OBS volume meters are post-filter (boost/limiter included). RNNoise turns white-noise test input
   into silence.
-- On Linux the app runs for development with fake inputs: `CLIPPER_DATA_DIR=dev-data/data
-  CLIPPER_CLIPS_DIR=dev-data/clips`, plus system `obs` with its own `XDG_CONFIG_HOME`. Debug-build
+- On Linux the app runs for development with fake inputs: `CLIPPER_DATA_DIR=$PWD/dev-data/data
+  CLIPPER_CLIPS_DIR=$PWD/dev-data/clips` (**absolute** paths: OBS runs in another cwd and a relative
+  XDG_CONFIG_HOME makes it miss the websocket config → "could not connect to OBS"), plus system `obs` with its own `XDG_CONFIG_HOME`. Debug-build
   hooks: `CLIPPER_DEV_JS_FILE=<file>` runs JS in the page after 6 s (use `invoke()` and
   `uiLog()`, whose output goes to clipper.log), `CLIPPER_DEV_VIEW=settings`, `CLIPPER_DEV_EDIT=1`.
   `node scripts/obsctl.mjs <data dir> <Request> [json]` drives the private OBS.
@@ -108,6 +113,8 @@ stream tag `name`.
 - Default volumes are 100%. Discord and the extra apps are always in the Mix.
 - Clipping starts automatically only for Steam games, Minecraft and apps the user added.
 - Not wanted for now: vertical export, automatic highlights.
+- No webcam overlay (removed in 0.3.1): OBS held the camera, so Discord couldn't use it. Setup
+  still removes a leftover "Webcam" input from older installs.
 
 ## Open items (2026-11-02)
 
@@ -115,5 +122,6 @@ stream tag `name`.
   whether removing OBS's tray icon works.
 - The owner saw "OBS running without Clipper" at least once. It's unclear whether that was the OBS
   tray icon or a real leftover process after Quit. Ask, and check the log.
-- Unconfirmed from 0.2.x: screen recording (main/all screens), recording an added app, webcam
-  overlay, combine clips.
+- Unconfirmed from 0.2.x: screen recording (main/all screens), recording an added app, combine clips.
+- The owner saw a Clipper error about Discord not loading (exact text unknown). Ask for a
+  "Report a problem" report when it happens again.
