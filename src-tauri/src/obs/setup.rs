@@ -266,6 +266,18 @@ pub fn ensure_dev_media(dev_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// OBS removes inputs asynchronously: creating one with the same name right
+/// after fails with "already exists". Wait (at most 3 s) until it is gone.
+async fn wait_removed(obs: &ObsClient, name: &str) {
+    for _ in 0..30 {
+        let list = obs.call("GetInputList", json!({})).await.unwrap_or_default();
+        if !list["inputs"].as_array().into_iter().flatten().any(|i| i["inputName"] == name) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) -> Result<()> {
     let list = obs.call("GetInputList", json!({})).await?;
     let existing: HashMap<String, String> = list["inputs"]
@@ -285,13 +297,20 @@ pub async fn ensure_scene(obs: &ObsClient, specs: &[InputSpec], w: u32, h: u32) 
     for spec in specs {
         match existing.get(spec.name) {
             Some(kind) if kind == spec.kind => {
+                // Keep the window the game detector chose: "" would unhook the
+                // running game (black frames, no sound) until the next retarget.
+                let mut settings = spec.settings.clone();
+                if let Some(m) = settings.as_object_mut() {
+                    m.remove("window");
+                }
                 obs.call("SetInputSettings",
-                    json!({ "inputName": spec.name, "inputSettings": spec.settings, "overlay": true }))
+                    json!({ "inputName": spec.name, "inputSettings": settings, "overlay": true }))
                     .await?;
             }
             other => {
                 if other.is_some() {
                     obs.call("RemoveInput", json!({ "inputName": spec.name })).await?;
+                    wait_removed(obs, spec.name).await;
                 }
                 obs.call("CreateInput", json!({
                     "sceneName": SCENE, "inputName": spec.name, "inputKind": spec.kind,

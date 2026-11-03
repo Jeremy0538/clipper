@@ -65,7 +65,10 @@ pub async fn run(app: AppHandle) {
                     set_status(&app, |s| s.game = None).await;
                     targeted = None;
                     st.user_stopped.store(false, Ordering::SeqCst);
-                    if auto_started && st.status.lock().await.buffer {
+                    // Also a buffer started by hand during the game: in game mode
+                    // it would go on recording an empty capture.
+                    let screen = st.screen.load(Ordering::SeqCst);
+                    if (auto_started || !screen) && st.status.lock().await.buffer {
                         if let Err(e) = st.obs.client.call("StopReplayBuffer", json!({})).await {
                             report_error(&app, format!("Could not stop the buffer: {e:#}"));
                         }
@@ -132,6 +135,18 @@ pub async fn run(app: AppHandle) {
                     clog!("buffer auto-started for {}", game.name);
                 }
                 Err(e) => {
+                    let msg = format!("{e:#}");
+                    let running = st.obs.client.call("GetReplayBufferStatus", json!({})).await
+                        .map(|v| v["outputActive"] == true).unwrap_or(false);
+                    if running {
+                        // Started at the same moment by hand ("already active"): fine.
+                        auto_started = true;
+                        continue;
+                    }
+                    if msg.contains("not connected") || msg.contains("did not answer") || msg.contains("connection closed") {
+                        continue; // OBS went away: the supervisor restarts it, try again then
+                    }
+                    clog!("buffer start failed: {msg}");
                     // Usually the GPU encoder (old driver, unsupported card): retry on the CPU.
                     if st.obs.fall_back_to_cpu() {
                         crate::notify::info(&app, "Using CPU encoding", "The GPU encoder could not start");

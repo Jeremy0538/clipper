@@ -39,7 +39,9 @@ impl ObsClient {
         Self {
             tx: Arc::default(),
             pending: Arc::default(),
-            events: broadcast::channel(64).0,
+            // Volume meters arrive ~20/s: room enough that a busy listener
+            // never loses a "replay saved" or state event behind them.
+            events: broadcast::channel(4096).0,
             next_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -76,6 +78,7 @@ impl ObsClient {
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        let mine = tx.clone();
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
                 if sink.send(m).await.is_err() {
@@ -103,9 +106,15 @@ impl ObsClient {
                     _ => {}
                 }
             }
-            *slot.lock().await = None;
-            pending.lock().await.clear();
-            let _ = events.send(json!({ "eventType": DISCONNECTED }));
+            // Only if no newer connection took over meanwhile: a late-closing old
+            // socket must not wipe the live one.
+            let mut slot = slot.lock().await;
+            if slot.as_ref().is_some_and(|t| t.same_channel(&mine)) {
+                *slot = None;
+                drop(slot);
+                pending.lock().await.clear();
+                let _ = events.send(json!({ "eventType": DISCONNECTED }));
+            }
         });
 
         *self.tx.lock().await = Some(tx);
@@ -119,11 +128,17 @@ impl ObsClient {
         let (s, r) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), s);
         let msg = json!({ "op": 6, "d": { "requestType": request, "requestId": id, "requestData": data } });
-        tx.send(Message::Text(msg.to_string().into()))?;
-        let d = tokio::time::timeout(Duration::from_secs(10), r)
-            .await
-            .map_err(|_| anyhow!("{request}: OBS did not answer"))?
-            .map_err(|_| anyhow!("{request}: connection closed"))?;
+        if let Err(e) = tx.send(Message::Text(msg.to_string().into())) {
+            self.pending.lock().await.remove(&id);
+            return Err(e.into());
+        }
+        let d = match tokio::time::timeout(Duration::from_secs(10), r).await {
+            Ok(r) => r.map_err(|_| anyhow!("{request}: connection closed"))?,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                bail!("{request}: OBS did not answer");
+            }
+        };
         let st = &d["requestStatus"];
         if st["result"].as_bool() != Some(true) {
             bail!(

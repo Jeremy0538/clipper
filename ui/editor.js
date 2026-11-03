@@ -51,6 +51,7 @@ async function openEditor(c) {
   // Each open gets a number; an older open that is still loading stops as soon
   // as it sees a newer one, so tracks of two clips never get mixed.
   const gen = ++ed.opening;
+  ed.clip = c;   // the library entry (its star moves to the edited copy when the original goes)
   const stale = () => gen !== ed.opening;
   showView("editor");
   $("ed-title").textContent = c.name;
@@ -104,11 +105,6 @@ function renderTracks() {
     name.textContent = t.s.name;
     const r = document.createElement("input");
     r.type = "range"; r.min = 0; r.max = 500; r.step = 5; r.value = 100;   // 100% = as recorded
-    if (!t.s.in_mix) {   // already part of "Desktop": would be heard twice
-      r.disabled = true; r.value = 0; t.gain.gain.value = 0;
-      name.title = "Already part of the Desktop track";
-      name.textContent += " (in Desktop)";
-    }
     const out = document.createElement("output");
     out.textContent = "100%";
     r.oninput = () => { t.gain.gain.value = r.value / 100; out.textContent = r.value + "%"; };
@@ -329,6 +325,10 @@ async function closeEditor() {
 }
 $("ed-back").onclick = closeEditor;
 
+// "Delete the original" is remembered on this PC.
+try { $("ed-replace").checked = localStorage.getItem("ed-replace") === "1"; } catch {}
+$("ed-replace").onchange = () => { try { localStorage.setItem("ed-replace", $("ed-replace").checked ? "1" : "0"); } catch {} };
+
 $("ed-export").onclick = async () => {
   if (!ed.info || ed.busy) return;
   if (keptLength() < 0.1) { $("ed-status").textContent = "Nothing left to save: every part is cut out"; return; }
@@ -342,8 +342,18 @@ $("ed-export").onclick = async () => {
       volumes: ed.tracks.map((t) => t.gain.gain.value),
       keep: keptParts(), fade: $("ed-fade").checked ? 0.5 : 0,
     } });
+    const original = ed.info.path, starred = !!ed.clip?.favorite;
     await closeEditor();
-    say("Saved: " + out);
+    if ($("ed-replace").checked) {
+      try {
+        releaseMedia(original);
+        await invoke("delete_clip", { path: original });
+        if (starred) await invoke("set_favorite", { path: out, on: true });
+        uiLog("editor: original moved to the recycle bin");
+        say("Saved: " + out + " · the original is in the recycle bin.");
+      } catch (err) { say("Saved: " + out + " · could not delete the original: " + err); }
+      loadClips();
+    } else say("Saved: " + out);
   } catch (err) { $("ed-status").textContent = "Save failed: " + err; }
   finally { ed.busy = false; $("ed-export").disabled = !ed.info; }
 };

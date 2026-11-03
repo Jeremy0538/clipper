@@ -169,6 +169,7 @@ impl Detector {
                 Some(c.name.as_str())
             } else if matches!(pname.as_str(), "java" | "javaw" | "java.exe" | "javaw.exe")
                 && cmd.contains("minecraft")
+                && !is_minecraft_server(&cmd)
             {
                 Some("Minecraft")
             } else if pname == "minecraft.windows.exe" {
@@ -434,5 +435,25 @@ mod tests {
         for a in running_apps() {
             println!("app: {} ({})", a.name, a.exe);
         }
+    }
+}
+
+/// A Minecraft server (run by the user, or a launcher tool) is Java with
+/// "minecraft" on its command line too, but nothing to clip.
+fn is_minecraft_server(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    ["nogui", "minecraft_server", "server.jar", "knotserver", "net.minecraft.server", "minecraftserver", "bundlerserver"]
+        .iter()
+        .any(|w| c.contains(w))
+}
+
+#[cfg(test)]
+mod server_tests {
+    #[test]
+    fn servers_are_not_games() {
+        assert!(super::is_minecraft_server("java -Xmx4G -jar minecraft_server.1.21.jar nogui"));
+        assert!(super::is_minecraft_server("java -jar fabric-server-launch.jar net.fabricmc.loader.impl.launch.knot.KnotServer"));
+        assert!(!super::is_minecraft_server("javaw -cp ... net.fabricmc.loader.impl.launch.knot.KnotClient --gameDir C:/minecraft"));
+        assert!(!super::is_minecraft_server("javaw net.minecraft.client.main.Main --version 1.21"));
     }
 }

@@ -512,12 +512,15 @@ pub fn enforce_limit(dirs: &[PathBuf], limit_gb: f64, favorites: &[String]) -> u
     let mut total: u64 = all.iter().map(|c| c.size).sum();
     all.sort_by_key(|c| c.modified); // oldest first
     let roots = root_keys(&ours);
+    // Never a clip that was just made: when starred clips alone are over the
+    // limit, the new clip would otherwise be deleted the moment it is saved.
+    let recent = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).saturating_sub(600);
     let mut n = 0;
     for c in all {
         if total <= limit {
             break;
         }
-        if Favorites::has(favorites, &c.path) {
+        if Favorites::has(favorites, &c.path) || c.modified >= recent {
             continue;
         }
         if fs::remove_file(&c.path).is_ok() {
@@ -561,6 +564,11 @@ mod fav_tests {
         // And the storage limit keeps it (in a folder that is Clipper's).
         super::mark(&real).unwrap();
         std::fs::write(real.join("b.mp4"), b"y").unwrap();
+        // A clip that was just made is never deleted, even over the limit.
+        assert_eq!(super::enforce_limit(&[link.clone()], 0.000_000_000_1, &loaded), 0, "a fresh clip stays");
+        assert!(real.join("b.mp4").exists());
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().append(true).open(real.join("b.mp4")).unwrap().set_modified(old).unwrap();
         assert_eq!(super::enforce_limit(&[link.clone()], 0.000_000_000_1, &loaded), 1, "the unstarred one goes");
         assert!(!real.join("b.mp4").exists());
         assert!(real.join("a.mp4").exists());

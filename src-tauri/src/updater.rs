@@ -4,10 +4,8 @@
 //! digest, then swapped in next to the running exe and Clipper restarts.
 
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 const REPO: &str = "Jeremy0538/clipper";
 const ASSET: &str = "clipper.exe";
@@ -71,7 +69,17 @@ pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
             sha256: sha.to_lowercase(),
         }));
     }
-    Ok(best.map(|(_, u)| u))
+    let found = best.map(|(_, u)| u);
+    *FOUND.lock().unwrap() = found.clone();
+    Ok(found)
+}
+
+/// The update the last check found, straight from GitHub. Installing only ever
+/// uses this one, never a URL or hash handed in by the page.
+static FOUND: std::sync::Mutex<Option<Update>> = std::sync::Mutex::new(None);
+
+pub fn found(version: &str) -> Option<Update> {
+    FOUND.lock().unwrap().clone().filter(|u| u.version == version)
 }
 
 fn exe_paths() -> Result<(PathBuf, PathBuf, PathBuf)> {
@@ -94,28 +102,9 @@ pub async fn install(u: &Update, progress: impl Fn(u32)) -> Result<()> {
         bail!("Updating is only supported on Windows");
     }
     let (new, old, exe) = exe_paths()?;
-    let resp = client()?.get(&u.url).send().await?.error_for_status()?;
-    let total = resp.content_length().unwrap_or(0);
-    let mut file = std::fs::File::create(&new).context("cannot write next to Clipper.exe")?;
-    let mut hasher = Sha256::new();
-    let (mut got, mut last) = (0u64, u32::MAX);
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk)?;
-        got += chunk.len() as u64;
-        if total > 0 && (got * 100 / total) as u32 != last {
-            last = (got * 100 / total) as u32;
-            progress(last);
-        }
-    }
-    file.flush()?;
-    drop(file);
-    if format!("{:x}", hasher.finalize()) != u.sha256 {
-        let _ = std::fs::remove_file(&new);
-        bail!("The download is corrupt (checksum mismatch)");
-    }
+    crate::obs::download::download(&u.url, &u.sha256, &new, &progress)
+        .await
+        .context("could not download the update")?;
     // A running exe can be renamed on Windows, not overwritten.
     let _ = std::fs::remove_file(&old);
     std::fs::rename(&exe, &old)?;

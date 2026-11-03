@@ -41,7 +41,9 @@ function render() {
   $("record").disabled = !ready;
   $("save").disabled = !status.buffer;
   if (status.screen && !status.game) { $("game").textContent = "Screen"; $("game").classList.add("on"); }
-  if (ready && !devicesLoaded) loadDevices();
+  // Once per OBS start (each call creates probe inputs in OBS); "Refresh" retries by hand.
+  if (ready && settings && !devicesLoaded && !devicesTried) { devicesTried = true; loadDevices(); }
+  if (!ready) devicesTried = false;
 }
 
 $("toggle").onclick = () => invoke(status.buffer ? "stop_buffer" : "start_buffer").catch(say);
@@ -406,19 +408,33 @@ function syncKeyLabels() {
   const labels = { clip: settings.hotkey_label, record: settings.record_hotkey_label, screenshot: settings.screenshot_hotkey_label };
   for (const b of document.querySelectorAll(".keybtn")) b.textContent = labels[b.dataset.which];
 }
+let listenTimer;
+function stopListening() {
+  if (!listening) return;
+  listening.classList.remove("listening");
+  listening = false;
+  clearTimeout(listenTimer);
+  syncKeyLabels();
+}
 for (const b of document.querySelectorAll(".keybtn")) {
   b.onclick = () => {
+    stopListening();
     listening = b;
     b.classList.add("listening");
     b.textContent = "Press keys… (Esc cancels)";
+    // Never keep waiting: a key typed much later (or elsewhere) must not become the hotkey.
+    listenTimer = setTimeout(stopListening, 10000);
   };
 }
+window.addEventListener("blur", stopListening);
+document.addEventListener("pointerdown", (e) => { if (listening && e.target !== listening) stopListening(); }, true);
 window.addEventListener("keydown", async (e) => {
   if (!listening) return;
   e.preventDefault();
   if (MODIFIERS.includes(e.code)) return; // wait for the real key
   const btn = listening;
   listening = false;
+  clearTimeout(listenTimer);
   btn.classList.remove("listening");
   if (e.code === "Escape") return loadSettings();
   try {
@@ -518,7 +534,7 @@ $("install-update").onclick = async () => {
   if (!pendingUpdate) return;
   $("install-update").disabled = $("check-update").disabled = true;
   $("update-text").textContent = "Downloading…";
-  try { await invoke("install_update", { update: pendingUpdate }); }
+  try { await invoke("install_update", { version: pendingUpdate.version }); }
   catch (err) {
     $("update-text").textContent = "Update failed: " + err;
     $("install-update").disabled = $("check-update").disabled = false;
@@ -557,7 +573,7 @@ $("game-filter").oninput = renderGames;
 
 // ---------- settings: audio ----------
 const VOLUMES = { "a-game-volume": "game_volume", "a-discord-volume": "discord_volume", "a-mic-volume": "mic_volume" };
-let devicesLoaded = false;
+let devicesLoaded = false, devicesTried = false, devicesLoading = false;
 
 // ---------- quality / screen ----------
 $("quality").onchange = async (e) => {
@@ -691,7 +707,8 @@ function fillDevices(id, devices, current) {
 }
 
 async function loadDevices() {
-  if (status.obs !== "ready" || !settings) return;
+  if (status.obs !== "ready" || !settings || devicesLoading) return;
+  devicesLoading = true;
   try {
     const [inputs, outputs] = [await invoke("list_audio_devices", { output: false }),
                                await invoke("list_audio_devices", { output: true })];
@@ -699,6 +716,7 @@ async function loadDevices() {
     fillDevices("a-desktop-device", outputs, settings.audio.desktop_device);
     devicesLoaded = true;
   } catch (err) { say("Could not list audio devices: " + err); }
+  finally { devicesLoading = false; }
 }
 $("refresh-devices").onclick = loadDevices;
 

@@ -76,7 +76,7 @@ Tauri v2 (Rust) + plain HTML/JS in `ui/` (no bundler, `withGlobalTauri`).
 | `autobuffer.rs` | 2 s tick: starts/stops the replay buffer when a game starts/stops |
 | `hotkey.rs` | Two listeners that never block the key: raw input (WM_INPUT, normally active) and a low-level keyboard hook (takes over only when raw input receives no keys; checked every 5 s). Only one acts at a time, so no dedup is needed; the log says which (`hook`/`raw`). Slots: Clip (only armed while clipping), Record, Screenshot. Defaults F8/F9/F10 |
 | `modes.rs`, `screen.rs` | Recording + screen mode (monitor capture, canvas resize, back to the game scene) |
-| `clips.rs` | Library: per-game folders in `Videos\Clipper` or a folder the user picked (`settings.clips_dir`; OBS then writes into `<clips>/.incoming`). Only folders with the `.clipper-clips` marker are sorted, size-limited or moved out of; the library also lists earlier Clipper folders (`old_clips_dirs`, Videos\Clipper), rename, favorites, storage limit |
+| `clips.rs` | Library: per-game folders in `Videos\Clipper` or a folder the user picked (`settings.clips_dir`); OBS always writes into `<clips>/.incoming` (same drive; since 0.4.9 also for the default folder), and `recover_leftovers` (lib.rs) adopts files left there or in the old `<data>/incoming` into "Recovered" at start. Only folders with the `.clipper-clips` marker are sorted, size-limited or moved out of; the library also lists earlier Clipper folders (`old_clips_dirs`, Videos\Clipper), rename, favorites, storage limit |
 | `editor.rs`, `tools.rs` | Trim, split/cut out parts (`keep` ranges → trim/atrim + concat in one graph), fade, save frame, volumes, export/combine/"Fit for Discord" via ffmpeg (pinned download into `<data>/ffmpeg`) |
 | `gpu.rs` | DXGI vendor → OBS + ffmpeg encoder (NVENC/AMF/QSV/x264), CPU fallback |
 | `updater.rs`, `installer.rs`, `autostart.rs` | GitHub-release updater, self-install to `%LOCALAPPDATA%\Programs\Clipper` + uninstall, HKCU Run |
@@ -103,6 +103,9 @@ stream tag `name`.
   restart. The buffer length (`AdvOut/RecRBTime`) does work live after stop/start of the buffer.
 - Game Capture can't hook normal apps (Chrome/Discord come out black). Added apps use Window Capture
   (WGC, method 2).
+- Settings that need an OBS restart (quality, track mask) while clipping/recording set `restart_pending`; `watch_events` restarts OBS once both outputs have stopped.
+- The obs-websocket event channel is shared with ~20/s volume meters: never block `watch_events` (file moves run in spawned tasks).
+- `ensure_scene` never sends `"window": ""` to an existing capture input (it would unhook the running game).
 - `RegisterHotKey` swallows the key. That's why we use a listen-only `WH_KEYBOARD_LL` hook.
 - OBS only starts hidden when its tray is enabled (`hideWindowOnStart` in OBSBasic.cpp). Clipper
   therefore deletes OBS's Qt tray icon (`QTrayIconMessageWindowClass`, uID 0) instead of disabling

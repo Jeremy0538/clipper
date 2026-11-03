@@ -4,6 +4,19 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.9
+- Editor: a **Delete the original** option next to Save. The original goes to the recycle bin and its star moves to the new clip. Clipper remembers your choice.
+- Editor: a part you removed can always be restored, even when every part is removed. Shortcuts keep working after you pick a preview speed, and holding a key no longer repeats Split or Save frame.
+- Editor: saving a clip with parts cut out is much faster on long clips, and the fade now applies to every audio track.
+- The storage limit never deletes a clip you just made (before, with starred clips over the limit, new clips disappeared right away).
+- A quality change or a new audio app now applies as soon as clipping stops, instead of after some later restart.
+- Recordings that were still being finished when Clipper quit, updated or crashed now show up under **Recovered**.
+- Clips are written straight onto the drive of your clips folder (no detour via C:), so saving is instant and big recordings can't fill C:.
+- Changing audio settings mid-game no longer gives a few seconds of black or silent video in your clips, and switching "Game sound" no longer loses the game audio.
+- Running a newer clipper.exe while Clipper is open now really switches to the new version.
+- A Minecraft server running in the background no longer starts clipping.
+- Combining clips twice in the same second no longer overwrites the first result, and a key button stops waiting for a key after 10 seconds or when you click elsewhere.
+
 ## 0.4.8
 - Editor: **Split** (S) cuts the clip at the playhead, **Remove part** (Delete) cuts that part out (press again to bring it back). Removed parts are skipped while playing and left out when you save.
 - Editor: Undo/Redo (Ctrl+Z / Ctrl+Y), step one frame with , and . , jump with Home/End, Shift+←/→ for 5 s.

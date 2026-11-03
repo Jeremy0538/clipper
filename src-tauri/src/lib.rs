@@ -73,6 +73,9 @@ pub struct AppState {
     pub last_game: std::sync::Mutex<Option<String>>,
     /// Folder for the recording that is running (decided when it starts).
     pub rec_folder: std::sync::Mutex<Option<String>>,
+    /// A setting that needs an OBS restart changed while clipping/recording:
+    /// restart as soon as both have stopped.
+    pub restart_pending: AtomicBool,
 }
 
 impl AppState {
@@ -249,7 +252,9 @@ async fn screenshot(app: AppHandle) -> Result<(), String> {
     take_screenshot(&app).await
 }
 
-#[tauri::command]
+// Runs off the main thread: file work (a folder lock held during a big move,
+// many clips on a slow drive) must not freeze the window.
+#[tauri::command(async)]
 fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) -> Result<String, String> {
     let p = clips::checked_in(&state.clip_dirs(), &path)?;
     if name.trim().is_empty() {
@@ -263,7 +268,9 @@ fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) ->
     Ok(new.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
+// Runs off the main thread: file work (a folder lock held during a big move,
+// many clips on a slow drive) must not freeze the window.
+#[tauri::command(async)]
 fn set_favorite(state: tauri::State<'_, AppState>, path: String, on: bool) -> Result<(), String> {
     let p = clips::checked_in(&state.clip_dirs(), &path)?;
     clips::Favorites::new(&state.obs.data_dir).set(&p.to_string_lossy(), on);
@@ -327,6 +334,7 @@ async fn set_quality(state: tauri::State<'_, AppState>, quality: String) -> Resu
     clog!("quality: {quality}");
     let s = state.status.lock().await.clone();
     if s.buffer || s.recording {
+        state.restart_pending.store(true, Ordering::SeqCst);
         return Ok(false);
     }
     state.obs.restart();
@@ -545,6 +553,8 @@ async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> R
             state.obs.restart();
             return Ok(());
         }
+        // The new track list applies once clipping and recording have stopped.
+        state.restart_pending.store(true, Ordering::SeqCst);
     }
     if state.obs.client.is_connected().await {
         state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
@@ -643,7 +653,8 @@ async fn check_update(state: tauri::State<'_, AppState>) -> Result<Option<update
 
 /// Downloads, swaps the exe and quits; the new version starts by itself.
 #[tauri::command]
-async fn install_update(app: AppHandle, update: updater::Update) -> Result<(), String> {
+async fn install_update(app: AppHandle, version: String) -> Result<(), String> {
+    let update = updater::found(&version).ok_or("Check for updates again first")?;
     clog!("installing update {}", update.version);
     let h = app.clone();
     updater::install(&update, move |p| { let _ = h.emit("update-progress", p); })
@@ -757,7 +768,9 @@ fn open_log_folder() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+// Runs off the main thread: file work (a folder lock held during a big move,
+// many clips on a slow drive) must not freeze the window.
+#[tauri::command(async)]
 fn delete_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let dirs = state.clip_dirs();
     let p = clips::checked_in(&dirs, &path)?;
@@ -799,7 +812,7 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
             }
             let tools = tools_for(&app).await?;
             clog!("share: fitting {} ({size_mb:.1} MB) into {mb} MB", p.display());
-            let info = editor::open(&tools, &data.join("share-cache"), &p)
+            let info = editor::probe(&tools, &p)
                 .await
                 .map_err(|e| format!("Could not read the clip: {e:#}"))?;
             std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -810,7 +823,7 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
             let out = editor::export(&tools, &out_dir, &info, &req, move |pc| { let _ = h.emit("share-progress", pc); })
                 .await
                 .map_err(|e| { clog!("ERROR share export: {e:#}"); format!("Could not make it smaller: {e:#}") })?;
-            let _ = std::fs::remove_dir_all(data.join("share-cache"));
+            let _ = std::fs::remove_dir_all(data.join("share-cache")); // left by older versions
             std::fs::rename(&out, &cached).map_err(|e| e.to_string())?;
             clog!("share: fitted to {:.1} MB", std::fs::metadata(&cached).map(|m| m.len() as f64 / 1e6).unwrap_or(0.0));
             (cached, "fitted")
@@ -855,9 +868,47 @@ fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), St
 }
 
 /// Where OBS writes a clip before Clipper moves it into the clips folder: on
-/// the same drive, so the move is instant and big recordings don't fill C:.
-fn incoming_dir(data_dir: &std::path::Path, clips_dir: &std::path::Path, default: &std::path::Path) -> PathBuf {
-    if clips_dir == default { data_dir.join("incoming") } else { clips_dir.join(clips::INCOMING) }
+/// the same drive, so the move is instant and big recordings don't fill C:
+/// (also for the default Videos\Clipper, which may be on another drive).
+fn incoming_dir(_data_dir: &std::path::Path, clips_dir: &std::path::Path, _default: &std::path::Path) -> PathBuf {
+    clips_dir.join(clips::INCOMING)
+}
+
+/// Files OBS finished while Clipper wasn't there to move them (quit, update or
+/// a crash during a recording): put them in the library under "Recovered".
+/// Only files from before this start, so nothing OBS is writing now.
+async fn recover_leftovers(app: AppHandle, started: std::time::SystemTime) {
+    let st = app.state::<AppState>();
+    let clips_dir = st.clips_dir();
+    let mut dirs = vec![st.obs.data_dir.join("incoming"), clips_dir.join(clips::INCOMING)];
+    dirs.extend(st.clip_dirs().iter().map(|d| d.join(clips::INCOMING)));
+    dirs.sort();
+    dirs.dedup();
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        let mut out = vec![];
+        for d in dirs {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                let video = p.extension().and_then(|x| x.to_str())
+                    .is_some_and(|x| ["mp4", "mkv", "mov"].contains(&x.to_ascii_lowercase().as_str()));
+                let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|m| m < started);
+                let partial = p.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(".part"));
+                if video && old && !partial && p.is_file() {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }).await.unwrap_or_default();
+    for p in found {
+        match adopt_blocking(&p.to_string_lossy(), clips_dir.clone(), Some("Recovered".into())).await {
+            Ok(dst) => {
+                clog!("recovered {} → {}", p.display(), dst.display());
+                let _ = app.emit("clip-saved", dst.to_string_lossy());
+            }
+            Err(e) => clog!("could not recover {}: {e:#}", p.display()),
+        }
+    }
 }
 
 /// Windows folder picker. None when cancelled.
@@ -1104,7 +1155,9 @@ async fn editor_close(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+// Runs off the main thread: file work (a folder lock held during a big move,
+// many clips on a slow drive) must not freeze the window.
+#[tauri::command(async)]
 fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
     let favs = clips::Favorites::new(&state.obs.data_dir).load();
     let mut v = clips::list_all(&state.clip_dirs());
@@ -1120,7 +1173,10 @@ async fn watch_events(app: AppHandle) {
     loop {
         let ev = match rx.recv().await {
             Ok(ev) => ev,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                clog!("WARN: {n} OBS events were missed");
+                continue;
+            }
             Err(_) => break,
         };
         match ev["eventType"].as_str().unwrap_or_default() {
@@ -1137,6 +1193,9 @@ async fn watch_events(app: AppHandle) {
                     notify::info(&app, "Clipping stopped", "");
                 }
                 set_status(&app, |s| s.buffer = active).await;
+                if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
+                    restart_if_pending(&app).await;
+                }
             }
             "ReplayBufferSaved" => {
                 let Some(src) = ev["eventData"]["savedReplayPath"].as_str() else { continue };
@@ -1148,16 +1207,21 @@ async fn watch_events(app: AppHandle) {
                     None => st.last_game.lock().unwrap().clone(),
                 };
                 clog!("OBS wrote {src}");
-                match adopt_blocking(src, st.clips_dir(), game.clone()).await {
-                    Ok(p) => {
-                        clog!("clip saved: {}", p.display());
-                        let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                        notify::toast(&app, true, "Clip saved", name);
-                        let _ = app.emit("clip-saved", p.to_string_lossy());
-                        after_new_file(&app).await;
+                // Moving the file can take a while (another drive): never hold up
+                // the event follower with it.
+                let (app, src, dir) = (app.clone(), src.to_string(), st.clips_dir());
+                tauri::async_runtime::spawn(async move {
+                    match adopt_blocking(&src, dir, game).await {
+                        Ok(p) => {
+                            clog!("clip saved: {}", p.display());
+                            let name = p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            notify::toast(&app, true, "Clip saved", name);
+                            let _ = app.emit("clip-saved", p.to_string_lossy());
+                            after_new_file(&app).await;
+                        }
+                        Err(e) => report_error(&app, format!("Could not store clip: {e:#}")),
                     }
-                    Err(e) => report_error(&app, format!("Could not store clip: {e:#}")),
-                }
+                });
             }
             "RecordStateChanged" => {
                 let d = &ev["eventData"];
@@ -1175,19 +1239,23 @@ async fn watch_events(app: AppHandle) {
                     let st = app.state::<AppState>();
                     if let Some(src) = d["outputPath"].as_str() {
                         let folder = st.rec_folder.lock().unwrap().take().unwrap_or_else(|| "Screen recording".into());
-                        match adopt_blocking(src, st.clips_dir(), Some(folder.clone())).await {
-                            Ok(p) => {
-                                clog!("recording saved: {}", p.display());
-                                notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-                                let _ = app.emit("clip-saved", p.to_string_lossy());
-                                after_new_file(&app).await;
+                        let (app, src, dir) = (app.clone(), src.to_string(), st.clips_dir());
+                        tauri::async_runtime::spawn(async move {
+                            match adopt_blocking(&src, dir, Some(folder)).await {
+                                Ok(p) => {
+                                    clog!("recording saved: {}", p.display());
+                                    notify::toast(&app, true, "Recording saved", p.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                                    let _ = app.emit("clip-saved", p.to_string_lossy());
+                                    after_new_file(&app).await;
+                                }
+                                Err(e) => report_error(&app, format!("Could not store recording: {e:#}")),
                             }
-                            Err(e) => report_error(&app, format!("Could not store recording: {e:#}")),
-                        }
+                        });
                     }
                     if !st.status.lock().await.buffer {
                         let _ = modes::leave_screen(&app).await;
                     }
+                    restart_if_pending(&app).await;
                 }
             }
             "InputVolumeMeters" => {
@@ -1226,6 +1294,16 @@ async fn watch_events(app: AppHandle) {
 }
 
 /// Moving a clip in can be a multi-GB copy (other drive): not on the event loop.
+/// Apply a setting that needed an OBS restart, now that nothing records.
+async fn restart_if_pending(app: &AppHandle) {
+    let st = app.state::<AppState>();
+    let s = st.status.lock().await.clone();
+    if !s.buffer && !s.recording && st.restart_pending.swap(false, Ordering::SeqCst) {
+        clog!("restarting OBS for changed settings");
+        st.obs.restart();
+    }
+}
+
 async fn adopt_blocking(src: &str, clips_dir: PathBuf, game: Option<String>) -> anyhow::Result<PathBuf> {
     let src = PathBuf::from(src);
     tauri::async_runtime::spawn_blocking(move || clips::adopt(&src, &clips_dir, game.as_deref())).await?
@@ -1248,7 +1326,13 @@ pub fn run() {
     let app = tauri::Builder::default()
         // A second start (desktop icon while it runs in the tray) opens the
         // running Clipper instead of starting another OBS.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|a| a == "--replace") {
+                installer::replace_with_installed(app);
+            } else {
+                show_main(app)
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
@@ -1369,6 +1453,7 @@ pub fn run() {
                 screen: AtomicBool::new(false),
                 last_game: std::sync::Mutex::new(None),
                 rec_folder: std::sync::Mutex::new(None),
+                restart_pending: AtomicBool::new(false),
             });
 
             // Tray
@@ -1432,6 +1517,7 @@ pub fn run() {
                 });
             }));
             tauri::async_runtime::spawn(watch_events(handle.clone()));
+            tauri::async_runtime::spawn(recover_leftovers(handle.clone(), std::time::SystemTime::now()));
             tauri::async_runtime::spawn(autobuffer::run(handle.clone()));
             notify::setup(&handle)?;
             if just_installed {

@@ -86,6 +86,7 @@ impl ObsManager {
         }
         let settings = self.settings.lock().unwrap().clone();
         let incoming = self.incoming.lock().unwrap().clone();
+        std::fs::create_dir_all(&incoming)?;
         config::write_all(&self.paths, &settings, &incoming, &self.password)?;
         #[cfg(not(windows))]
         setup::ensure_dev_media(&self.data_dir)?;
@@ -204,6 +205,9 @@ impl ObsManager {
         let s = self.settings.lock().unwrap().clone();
         let specs = setup::specs(&self.data_dir, &s.audio);
         setup::ensure_scene(&self.client, &specs, s.width, s.height).await?;
+        // New or recreated audio inputs are only in the game scene: put them in
+        // the Screen scene too, or screen clips miss them.
+        crate::screen::mirror_audio(&self.client).await;
         setup::set_track_names(&self.client, &s.audio).await
     }
 

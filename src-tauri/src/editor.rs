@@ -26,9 +26,6 @@ pub struct Track {
     pub name: String,
     /// Extracted copy for the preview player.
     pub file: String,
-    /// Part of the rebuilt Mix. False for Discord/apps when a "Desktop" track
-    /// (everything you heard) already contains them.
-    pub in_mix: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -133,7 +130,17 @@ fn track_name(pos: usize, tags: &serde_json::Value, total: usize) -> String {
     else { format!("Track {}", pos + 1) }
 }
 
+/// Open a clip in the editor: probe it and extract the source tracks for the preview.
 pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> {
+    probe_into(tools, Some(cache), path).await
+}
+
+/// Only read what the clip contains (no files written): enough for an export.
+pub async fn probe(tools: &Tools, path: &Path) -> Result<ClipInfo> {
+    probe_into(tools, None, path).await
+}
+
+async fn probe_into(tools: &Tools, cache: Option<&Path>, path: &Path) -> Result<ClipInfo> {
     let mut c = command(&tools.ffprobe);
     c.args(["-v", "error", "-show_entries",
             "format=duration,start_time:stream=index,codec_type,width,height,avg_frame_rate:stream_tags=name,title,handler_name",
@@ -147,10 +154,16 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
     // With a Mix + sources layout, the sources are what you edit.
     let picks: Vec<usize> = if audio.len() >= 2 { (1..audio.len()).collect() } else { (0..audio.len()).collect() };
 
-    let _ = std::fs::remove_dir_all(cache);
-    std::fs::create_dir_all(cache)?;
     let mut sources = vec![];
-    if !picks.is_empty() {
+    if let Some(cache) = cache {
+        let _ = std::fs::remove_dir_all(cache);
+        std::fs::create_dir_all(cache)?;
+    }
+    if cache.is_none() {
+        for &i in &picks {
+            sources.push(Track { index: i, name: track_name(i, &audio[i]["tags"], audio.len()), file: String::new() });
+        }
+    } else if let Some(cache) = cache.filter(|_| !picks.is_empty()) {
         let mut c = command(&tools.ffmpeg);
         c.args(["-v", "error", "-y", "-i"]).arg(path);
         for &i in &picks {
@@ -160,7 +173,6 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
                 index: i,
                 name: track_name(i, &audio[i]["tags"], audio.len()),
                 file: f.to_string_lossy().into_owned(),
-                in_mix: true,
             });
         }
         run(c).await.context("could not read the audio tracks")?;
@@ -176,7 +188,7 @@ pub async fn open(tools: &Tools, cache: &Path, path: &Path) -> Result<ClipInfo> 
         sources,
         thumbs: vec![],
         start,
-        cache: cache.to_string_lossy().into_owned(),
+        cache: cache.map(|c| c.to_string_lossy().into_owned()).unwrap_or_default(),
     })
 }
 
@@ -192,12 +204,7 @@ pub async fn save_frame(tools: &Tools, info: &ClipInfo, time: f64) -> Result<Pat
     let src = Path::new(&info.path);
     let dir = src.parent().context("clip has no folder")?;
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-    let mut out = dir.join(format!("{} (frame) {stamp}.png", base_name(&info.name)));
-    let mut n = 2;
-    while out.exists() {
-        out = dir.join(format!("{} (frame) {stamp} ({n}).png", base_name(&info.name)));
-        n += 1;
-    }
+    let out = crate::clips::free_name(dir, &format!("{} (frame) {stamp}", base_name(&info.name)), Some("png"));
     let part = out.with_extension("part.png");
     let mut c = command(&tools.ffmpeg);
     c.args(["-hide_banner", "-v", "error", "-y", "-ss", &format!("{:.3}", time.clamp(0.0, (info.duration - 1.0 / info.fps.max(1.0)).max(0.0)))])
@@ -296,16 +303,24 @@ pub async fn export(
         .filter(|&h| h < info.height);
 
     // Which sources carry sound in the range?
-    let mut keep: Vec<(&Track, f64)> = vec![];
-    for (t, &v) in info.sources.iter().zip(req.volumes.iter().chain(std::iter::repeat(&1.0))) {
-        // Only the kept parts count: sound in a cut-out part doesn't make a track worth keeping.
-        let mut peak = f64::NEG_INFINITY;
-        for &(a, b) in &ranges {
-            peak = peak.max(peak_db(tools, src, t.index, a, b).await.unwrap_or(0.0));
-            if peak > SILENT_DB {
-                break;
+    // Only the kept parts count: sound in a cut-out part doesn't make a track
+    // worth keeping. All tracks are measured at the same time.
+    let peaks = futures_util::future::join_all(info.sources.iter().map(|t| {
+        let ranges = &ranges;
+        async move {
+            let mut peak = f64::NEG_INFINITY;
+            for &(a, b) in ranges {
+                peak = peak.max(peak_db(tools, src, t.index, a, b).await.unwrap_or(0.0));
+                if peak > SILENT_DB {
+                    break;
+                }
             }
+            peak
         }
+    }))
+    .await;
+    let mut keep: Vec<(&Track, f64)> = vec![];
+    for ((t, &v), peak) in info.sources.iter().zip(req.volumes.iter().chain(std::iter::repeat(&1.0))).zip(peaks) {
         if peak > SILENT_DB {
             keep.push((t, v));
         } else {
@@ -316,20 +331,12 @@ pub async fn export(
         keep = info.sources.iter().zip(req.volumes.iter().copied().chain(std::iter::repeat(1.0))).collect();
     }
 
-    // Sources whose sound already sits in "Desktop" stay out of the new Mix.
-    let mut mixed: Vec<(&Track, f64)> = keep.iter().filter(|(t, _)| t.in_mix).cloned().collect();
-    if mixed.is_empty() {
-        mixed = keep.clone();
-    }
+    // Every kept source goes into the new Mix.
+    let mixed = &keep;
 
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
     let tag = if req.target_mb.is_some() { "(Discord)" } else { "(edited)" };
-    let mut out = clips_dir.join(format!("{} {tag} {stamp}.mp4", base_name(&info.name)));
-    let mut n = 2;
-    while out.exists() {
-        out = clips_dir.join(format!("{} {tag} {stamp} ({n}).mp4", base_name(&info.name)));
-        n += 1;
-    }
+    let out = crate::clips::free_name(clips_dir, &format!("{} {tag} {stamp}", base_name(&info.name)), Some("mp4"));
     let part = out.with_extension("part.mp4");
 
     // `on_gpu`: NVIDIA fit-to-size keeps every frame on the graphics card (CUDA
@@ -361,7 +368,6 @@ pub async fn export(
             }
             c.arg("-i").arg(src);
         }
-        let in_mix = |i: usize| mixed.iter().any(|(t, _)| t.index == i);
         // Filter chains, joined with ';'. A filter output can be used only once;
         // an input stream ([0:a:1]) as often as needed.
         let mut graph: Vec<String> = vec![];
@@ -369,7 +375,7 @@ pub async fn export(
         let mut own_label = std::collections::HashMap::new();
         let video_label: String;
         if cut {
-            let used: Vec<usize> = keep.iter().map(|(t, _)| t.index).filter(|&i| sources_mapped || in_mix(i)).collect();
+            let used: Vec<usize> = keep.iter().map(|(t, _)| t.index).collect();
             let mut chain = String::new();
             for k in 0..ranges.len() {
                 chain += &format!("[{k}:v:0]");
@@ -383,14 +389,13 @@ pub async fn export(
             }
             graph.push(chain);
             for &i in &used {
-                if in_mix(i) && sources_mapped {
+                // In the Mix, and (when sources are kept) as its own track too.
+                if sources_mapped {
                     graph.push(format!("[c{i}]asplit=2[m{i}][o{i}]"));
                     mix_label.insert(i, format!("[m{i}]"));
                     own_label.insert(i, format!("[o{i}]"));
-                } else if in_mix(i) {
-                    mix_label.insert(i, format!("[c{i}]"));
                 } else {
-                    own_label.insert(i, format!("[c{i}]"));
+                    mix_label.insert(i, format!("[c{i}]"));
                 }
             }
             video_label = "[vc]".into();
@@ -606,7 +611,7 @@ pub async fn combine(tools: &Tools, out_dir: &Path, paths: &[PathBuf], progress:
     let total: f64 = lens.iter().sum();
     let first = paths[0].file_stem().unwrap_or_default().to_string_lossy().into_owned();
     let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M-%S");
-    let out = out_dir.join(format!("{} (combined) {stamp}.mp4", base_name(&first)));
+    let out = crate::clips::free_name(out_dir, &format!("{} (combined) {stamp}", base_name(&first)), Some("mp4"));
     let part = out.with_extension("part.mp4");
 
     let mut graph = String::new();

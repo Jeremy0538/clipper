@@ -35,7 +35,21 @@ pub async fn enter_screen(app: &AppHandle) -> Result<(), String> {
     }
     let audio = screen::audio_inputs(obs).await;
     let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
-    let (w, h) = screen::prepare(obs, &choice, &audio).await.map_err(|e| format!("{e:#}"))?;
+    let (w, h) = match screen::prepare(obs, &choice, &audio).await {
+        Ok(v) => v,
+        Err(e) => {
+            // prepare() changed the canvas first: put it and the game scene back.
+            let (gw, gh) = {
+                let s = st.obs.settings.lock().unwrap();
+                (s.width, s.height)
+            };
+            let _ = screen::set_canvas(obs, gw, gh).await;
+            if let Err(e) = st.obs.apply_audio().await {
+                clog!("refit game scene: {e:#}");
+            }
+            return Err(format!("{e:#}"));
+        }
+    };
     screen::use_scene(obs, screen::SCREEN_SCENE).await.map_err(|e| format!("{e:#}"))?;
     st.screen.store(true, Ordering::SeqCst);
     clog!("screen mode ({choice}, {w}x{h})");
@@ -61,7 +75,7 @@ pub async fn leave_screen(app: &AppHandle) -> Result<(), String> {
     if let Err(e) = st.obs.apply_audio().await {
         clog!("refit game scene: {e:#}");
     }
-    // apply_audio resets the capture windows: let the game detector retarget them.
+    // Let the game detector retarget the captures (cheap, and safe after a canvas change).
     st.obs_session.fetch_add(1, Ordering::SeqCst);
     screen::use_scene(obs, SCENE).await.map_err(|e| format!("{e:#}"))?;
     st.screen.store(false, Ordering::SeqCst);

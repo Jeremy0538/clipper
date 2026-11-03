@@ -38,6 +38,25 @@ pub fn handle_start() -> Action {
     }
 }
 
+/// A newer version was installed over this running one: start it (it waits
+/// until this one is gone) and quit.
+pub fn replace_with_installed(app: &tauri::AppHandle) {
+    #[cfg(windows)]
+    if let Some(exe) = win::installed_exe() {
+        crate::clog!("a newer version was installed: handing over to it");
+        let ok = std::process::Command::new(&exe)
+            .args(["--installed", "--wait-pid", &std::process::id().to_string()])
+            .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
+            .spawn()
+            .is_ok();
+        if ok {
+            app.exit(0);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
 #[cfg(windows)]
 mod win {
     use std::{
@@ -49,6 +68,10 @@ mod win {
 
     const NO_WINDOW: u32 = 0x0800_0000;
     const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Clipper";
+
+    pub fn installed_exe() -> Option<PathBuf> {
+        install_dir().map(|d| d.join("clipper.exe"))
+    }
 
     fn install_dir() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs").join("Clipper"))
@@ -111,7 +134,9 @@ mod win {
             return Ok(false);
         }
         std::fs::create_dir_all(&dir)?;
+        let mut replaced = false;
         if std::fs::copy(&me, &target).is_err() {
+            replaced = true;
             // An installed Clipper is running: a running exe can be renamed, not overwritten.
             let old = target.with_extension("exe.old");
             let _ = std::fs::remove_file(&old);
@@ -132,7 +157,14 @@ mod win {
         key.set_value("NoModify", &1u32)?;
         key.set_value("NoRepair", &1u32)?;
         key.set_value("EstimatedSize", &(std::fs::metadata(&target).map(|m| m.len() / 1024).unwrap_or(0) as u32))?;
-        Command::new(&target).arg("--installed").current_dir(&dir).spawn()?;
+        // With the old version still running, the single-instance plugin hands
+        // this start to it: "--replace" tells it to quit and start the new one.
+        let mut c = Command::new(&target);
+        c.arg("--installed").current_dir(&dir);
+        if replaced {
+            c.arg("--replace");
+        }
+        c.spawn()?;
         Ok(true)
     }
 

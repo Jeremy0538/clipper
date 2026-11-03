@@ -168,6 +168,17 @@ pub async fn use_scene(obs: &ObsClient, scene: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add the audio inputs that the Screen scene (if any) doesn't have yet.
+pub async fn mirror_audio(obs: &ObsClient) {
+    let Ok(items) = obs.call("GetSceneItemList", json!({ "sceneName": SCREEN_SCENE })).await else { return };
+    let have: Vec<&str> = items["sceneItems"].as_array().into_iter().flatten().filter_map(|i| i["sourceName"].as_str()).collect();
+    for a in audio_inputs(obs).await {
+        if !have.contains(&a.as_str()) {
+            let _ = obs.call("CreateSceneItem", json!({ "sceneName": SCREEN_SCENE, "sourceName": a })).await;
+        }
+    }
+}
+
 /// Audio inputs that currently exist (to mirror them into the Screen scene).
 pub async fn audio_inputs(obs: &ObsClient) -> Vec<String> {
     let names = [setup::GAME_AUDIO, setup::DISCORD, setup::MIC, setup::APP_INPUTS[0], setup::APP_INPUTS[1]];

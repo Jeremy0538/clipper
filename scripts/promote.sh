@@ -6,7 +6,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ver="${1:?usage: scripts/promote.sh X.Y.Z}"
-prev="$(gh release list --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')"
+# The newest stable release *before* this one (so re-running promote for a
+# version that is already stable doesn't end up with empty notes).
+prev="$(gh release list --exclude-pre-releases --limit 100 --json tagName -q '.[].tagName' | python3 -c '
+import sys
+ver = tuple(map(int, sys.argv[1].split(".")))
+vs = [tuple(map(int, t.strip().lstrip("v").split("."))) for t in sys.stdin if t.strip()]
+older = [v for v in vs if v < ver]
+print(".".join(map(str, max(older))) if older else "")
+' "$ver")"
 notes="$(python3 - "$prev" "$ver" <<'PY'
 import re, sys
 prev, ver = (tuple(map(int, v.split("."))) if v else (0, 0, 0) for v in sys.argv[1:3])
