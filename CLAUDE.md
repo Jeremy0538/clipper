@@ -140,6 +140,7 @@ stream tag `name`.
 - Default volumes are 100%. Discord and the extra apps are always in the Mix.
 - Clipping starts automatically only for Steam games, Minecraft and apps the user added.
 - Not wanted for now: vertical export, automatic highlights.
+- Screen content stays in three folders on purpose (2026-11-03): "Screen" (clips), "Screen recording", "Screenshots". One folder would be unclear; copying goes through Clipper itself.
 - No webcam overlay (removed in 0.3.1): OBS held the camera, so Discord couldn't use it. Setup
   still removes a leftover "Webcam" input from older installs.
 
