@@ -51,7 +51,7 @@
     </div>
     <div id="ed-stage"><video id="ed-video" muted playsinline></video><img id="ed-scrub" alt=""></div>
     <div id="ed-timeline">
-      <div id="ed-range"></div><div id="ed-playhead"></div>
+      <div id="ed-range"></div><div id="ed-cuts"></div><div id="ed-playhead"></div>
       <div class="ed-handle" id="ed-h-start" title="Start"></div><div class="ed-handle" id="ed-h-end" title="End"></div>
     </div>
     <div class="ed-controls">
@@ -59,10 +59,23 @@
       <span id="ed-time">0:00.0</span>
       <button id="ed-set-start">Start here (I)</button>
       <button id="ed-set-end">End here (O)</button>
+      <button id="ed-split" title="Split the clip at the playhead (S)">✂ Split (S)</button>
+      <button id="ed-remove" title="Cut out the part under the playhead, or bring it back (Delete)">Remove part (Del)</button>
+      <button id="ed-undo" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="ed-redo" title="Redo (Ctrl+Y)">Redo</button>
       <button id="ed-reset">Reset</button>
       <span id="ed-length"></span>
+    </div>
+    <div class="ed-controls">
+      <button id="ed-frame-back" title="One frame back (,)">◀ Frame</button>
+      <button id="ed-frame-fwd" title="One frame forward (.)">Frame ▶</button>
+      <select id="ed-speed" title="Preview speed (the saved clip keeps normal speed)">
+        <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option>
+      </select>
+      <label class="ed-check"><input type="checkbox" id="ed-fade"> Fade in/out</label>
+      <button id="ed-snap" title="Save this frame as a picture (P)">Save frame (P)</button>
       <span class="spacer"></span>
-      <span class="hint">Space plays · I/O set start/end · ←/→ 1 s</span>
+      <span class="hint">Space play · I/O start/end · S split · Del remove · ,/. frame · ←/→ 1 s (Shift 5 s) · Home/End</span>
     </div>
     <div id="ed-tracks"></div>
   </main>

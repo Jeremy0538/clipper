@@ -93,6 +93,12 @@ button.small { padding:4px 10px; font-size:12px; font-weight:400; }
 #ed-scrub.on { display:block; }
 #ed-timeline { flex:none; position:relative; height:44px; background:var(--card); border:1px solid var(--line); border-radius:6px; cursor:pointer; touch-action:none; }
 #ed-range { position:absolute; top:0; bottom:0; background:color-mix(in srgb, var(--accent) 30%, transparent); border-left:2px solid var(--accent); border-right:2px solid var(--accent); pointer-events:none; }
+#ed-cuts { position:absolute; inset:0; pointer-events:none; }
+.ed-cut { position:absolute; top:0; bottom:0; background:repeating-linear-gradient(135deg, color-mix(in srgb, var(--bg) 85%, transparent) 0 6px, color-mix(in srgb, var(--fg) 12%, transparent) 6px 12px); }
+.ed-split { position:absolute; top:0; bottom:0; width:0; border-left:2px dashed var(--fg); opacity:.7; }
+.ed-cur { position:absolute; top:auto; bottom:0; height:3px; background:var(--fg); opacity:.5; }
+#ed-speed { background:var(--ctl); color:var(--fg); border:1px solid var(--ctl-border); border-radius:6px; padding:5px 6px; font:inherit; }
+.ed-check { display:flex; align-items:center; gap:6px; color:var(--dim); }
 #ed-playhead { position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--fg); pointer-events:none; }
 .ed-handle { position:absolute; top:0; bottom:0; width:14px; margin-left:-7px; cursor:ew-resize; }
 .ed-handle::after { content:""; position:absolute; left:4px; top:8px; bottom:8px; width:6px; border-radius:3px; background:var(--accent); }

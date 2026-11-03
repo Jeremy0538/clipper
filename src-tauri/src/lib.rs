@@ -804,7 +804,7 @@ async fn share_clip(app: AppHandle, path: String, max_mb: Option<f64>) -> Result
                 .map_err(|e| format!("Could not read the clip: {e:#}"))?;
             std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
             let req = editor::ExportRequest {
-                path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(mb),
+                path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(mb), keep: vec![], fade: 0.0,
             };
             let h = app.clone();
             let out = editor::export(&tools, &out_dir, &info, &req, move |pc| { let _ = h.emit("share-progress", pc); })
@@ -1018,7 +1018,7 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
         return Err("The editor has a different clip open".into());
     }
     let tools = tools_for(&app).await?;
-    clog!("editor: export {:.2}-{:.2} volumes {:?}", request.start, request.end, request.volumes);
+    clog!("editor: export {:.2}-{:.2} parts {:?} fade {} volumes {:?}", request.start, request.end, request.keep, request.fade, request.volumes);
     let h = app.clone();
     // The edited copy goes next to the original (its game folder).
     let folder = std::path::Path::new(&info.path).parent().map(|p| p.to_path_buf()).unwrap_or(st.clips_dir());
@@ -1026,6 +1026,21 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
         .await
         .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
     clog!("editor: saved {}", out.display());
+    let _ = app.emit("clip-saved", out.to_string_lossy());
+    after_new_file(&app).await;
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// Save the frame at `time` of the open clip as a PNG next to it.
+#[tauri::command]
+async fn editor_frame(app: AppHandle, time: f64) -> Result<String, String> {
+    let st = app.state::<AppState>();
+    let info = st.editor.lock().await.clone().ok_or("No clip is open in the editor")?;
+    let tools = tools_for(&app).await?;
+    let out = editor::save_frame(&tools, &info, time)
+        .await
+        .map_err(|e| { clog!("ERROR editor frame: {e:#}"); format!("{e:#}") })?;
+    clog!("editor: saved frame {}", out.display());
     let _ = app.emit("clip-saved", out.to_string_lossy());
     after_new_file(&app).await;
     Ok(out.to_string_lossy().into_owned())
@@ -1244,7 +1259,7 @@ pub fn run() {
             remove_custom_game, set_meters,
             delete_clip, reveal_clip, open_clips_folder,
             check_update, install_update, set_theme,
-            editor_open, editor_export, editor_close, editor_track, editor_thumbs, ui_log, set_frame_color,
+            editor_open, editor_export, editor_close, editor_track, editor_thumbs, editor_frame, ui_log, set_frame_color,
             screenshot, rename_clip, set_favorite, set_storage_limit, combine_clips, finish_setup,
             set_report_token, report_problem, report_github, share_clip, pick_folder, set_clips_dir, whats_new
         ])

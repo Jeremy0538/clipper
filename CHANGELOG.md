@@ -4,6 +4,11 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.8
+- Editor: **Split** (S) cuts the clip at the playhead, **Remove part** (Delete) cuts that part out (press again to bring it back). Removed parts are skipped while playing and left out when you save.
+- Editor: Undo/Redo (Ctrl+Z / Ctrl+Y), step one frame with , and . , jump with Home/End, Shift+←/→ for 5 s.
+- Editor: preview at 0.25×–2× speed, "Fade in/out" when saving, and **Save frame** (P) saves the current picture next to the clip.
+
 ## 0.4.7
 - Deleting the last clip of a game also removes its now-empty folder.
 - Deleting works while the clip is open in the player or editor.

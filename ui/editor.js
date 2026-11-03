@@ -1,7 +1,9 @@
 // Clip editor: trim (timeline handles, I/O), per-track volume preview via
 // WebAudio (tracks decoded from bytes the app hands over, so gain > 100% works),
 // export through the app (ffmpeg). Loaded after main.js and uses its helpers.
-const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false, opening: 0 };
+const ed = { info: null, start: 0, end: 0, tracks: [], ctx: null, playingFrom: null, busy: false, opening: 0,
+  // The clip split into parts; a part with keep=false is cut out on save.
+  segs: [], undo: [], redo: [], rate: 1 };
 const edv = $("ed-video");
 // While dragging, show the nearest keyframe image instantly and only seek the
 // real video when the mouse is released (seeking a big clip is slow).
@@ -60,6 +62,8 @@ async function openEditor(c) {
     if (stale()) return;
     stopAudio();
     ed.info = info; ed.start = 0; ed.end = info.duration;
+    ed.segs = [{ a: 0, b: info.duration, keep: true }]; ed.undo = []; ed.redo = [];
+    edv.playbackRate = ed.rate;
     $("ed-scrub").classList.remove("on");
     edv.src = convertFileSrc(info.path);
     ed.ctx = ed.ctx || new AudioContext();
@@ -123,6 +127,7 @@ function startAudio() {
   for (const t of ed.tracks) {
     const n = ed.ctx.createBufferSource();
     n.buffer = t.buf;
+    n.playbackRate.value = ed.rate;
     n.connect(t.gain);
     n.start(0, Math.min(at, t.buf.duration));
     t.node = n;
@@ -135,13 +140,17 @@ edv.addEventListener("play", () => $("ed-scrub").classList.remove("on"));
 edv.onseeked = () => { if (!edv.paused) startAudio(); renderTimeline(); };
 setInterval(() => {   // drift correction
   if (edv.paused || !ed.playingFrom) return;
-  const audioPos = ed.playingFrom.video + (ed.ctx.currentTime - ed.playingFrom.ctx);
+  const audioPos = ed.playingFrom.video + (ed.ctx.currentTime - ed.playingFrom.ctx) * ed.rate;
   if (Math.abs(audioPos - edv.currentTime) > 0.12) startAudio();
 }, 500);
 
 function tick() {
   if (ed.info && !$("view-editor").classList.contains("hidden")) {
     if (!edv.paused && edv.currentTime >= ed.end) { edv.pause(); edv.currentTime = ed.start; }
+    else if (!edv.paused && !edv.seeking) {   // jump over parts that are cut out
+      const s = segAt(edv.currentTime);
+      if (s && !s.keep) { if (s.b >= ed.end) { edv.pause(); edv.currentTime = ed.start; } else edv.currentTime = s.b; }
+    }
     renderTimeline();
   }
   requestAnimationFrame(tick);
@@ -158,7 +167,77 @@ function renderTimeline() {
   const now = ed.shownTime ?? edv.currentTime ?? 0;   // follow the mouse while seeking
   $("ed-playhead").style.left = pct(now);
   $("ed-time").textContent = `${fmtT(now)} / ${fmtT(d)}`;
-  $("ed-length").textContent = "Length " + fmtT(ed.end - ed.start);
+  $("ed-length").textContent = "Length " + fmtT(keptLength());
+  const cur = segAt(now);
+  const marks = [];
+  for (const s of ed.segs) {
+    if (!s.keep) { const e = document.createElement("div"); e.className = "ed-cut"; e.style.left = pct(s.a); e.style.width = pct(s.b - s.a); marks.push(e); }
+    if (s.a > 0) { const e = document.createElement("div"); e.className = "ed-split"; e.style.left = pct(s.a); marks.push(e); }
+  }
+  if (cur && ed.segs.length > 1) { const e = document.createElement("div"); e.className = "ed-cur"; e.style.left = pct(cur.a); e.style.width = pct(cur.b - cur.a); marks.push(e); }
+  const key = ed.segs.map((s) => `${s.a}-${s.b}-${s.keep}`).join("|") + "#" + (cur?.a ?? "");
+  if (key !== ed.marksKey) { ed.marksKey = key; $("ed-cuts").replaceChildren(...marks); }
+  $("ed-remove").textContent = cur && !cur.keep ? "Restore part (Del)" : "Remove part (Del)";
+  $("ed-remove").disabled = ed.segs.length < 2;
+  $("ed-undo").disabled = !ed.undo.length;
+  $("ed-redo").disabled = !ed.redo.length;
+}
+
+// --- parts, undo ---
+const segAt = (t) => ed.segs.find((s) => t >= s.a && t < s.b) || ed.segs[ed.segs.length - 1];
+// Kept parts inside start..end, neighbours merged (what gets saved).
+function keepRanges() {
+  const out = [];
+  for (const s of ed.segs) {
+    if (!s.keep) continue;
+    const a = Math.max(s.a, ed.start), b = Math.min(s.b, ed.end);
+    if (b - a < 0.1) continue;
+    if (out.length && a <= out[out.length - 1][1] + 0.02) out[out.length - 1][1] = b; else out.push([a, b]);
+  }
+  return out;
+}
+const keptLength = () => keepRanges().reduce((n, [a, b]) => n + b - a, 0);
+const snapshot = () => JSON.stringify({ start: ed.start, end: ed.end, segs: ed.segs });
+function remember() { ed.undo.push(snapshot()); if (ed.undo.length > 100) ed.undo.shift(); ed.redo = []; }
+function restore(from, to) {
+  if (!ed.info || !from.length) return;
+  to.push(snapshot());
+  const s = JSON.parse(from.pop());
+  ed.start = s.start; ed.end = s.end; ed.segs = s.segs;
+  renderTimeline();
+}
+const edNow = () => ed.shownTime ?? edv.currentTime;
+function split() {
+  if (!ed.info) return;
+  const t = edNow(), s = segAt(t);
+  if (t - s.a < 0.2 || s.b - t < 0.2) return;   // too close to an existing split
+  remember();
+  ed.segs.splice(ed.segs.indexOf(s), 1, { a: s.a, b: t, keep: s.keep }, { a: t, b: s.b, keep: s.keep });
+  renderTimeline();
+}
+function toggleRemove() {
+  if (!ed.info || ed.segs.length < 2) return;
+  const s = segAt(edNow());
+  remember();
+  s.keep = !s.keep;
+  // Cut-out neighbours become one part (kept parts keep their splits).
+  const merged = [];
+  for (const x of ed.segs) {
+    const l = merged[merged.length - 1];
+    if (l && l.keep === x.keep && !x.keep) l.b = x.b; else merged.push({ ...x });
+  }
+  ed.segs = merged;
+  renderTimeline();
+}
+function stepFrame(n) {
+  if (!ed.info) return;
+  edv.pause();
+  seekTo(Math.max(0, Math.min(ed.info.duration, edNow() + n / (ed.info.fps || 60))));
+}
+async function saveFrame() {
+  if (!ed.info) return;
+  try { const out = await invoke("editor_frame", { time: edNow() }); say("Saved frame: " + out); }
+  catch (err) { $("ed-status").textContent = "Could not save the frame: " + err; }
 }
 
 function timeAt(ev) {
@@ -169,6 +248,7 @@ let dragging = null;
 $("ed-timeline").onpointerdown = (ev) => {
   if (!ed.info) return;
   dragging = ev.target.id === "ed-h-start" ? "start" : ev.target.id === "ed-h-end" ? "end" : "seek";
+  if (dragging !== "seek") remember();
   $("ed-timeline").setPointerCapture(ev.pointerId);
   $("ed-timeline").onpointermove(ev);
 };
@@ -190,20 +270,49 @@ const togglePlay = () => {
     edv.play();
   } else edv.pause();
 };
-const setStart = () => { ed.start = Math.min(edv.currentTime, ed.end - 0.5); renderTimeline(); };
-const setEnd = () => { ed.end = Math.max(edv.currentTime, ed.start + 0.5); renderTimeline(); };
+const setStart = () => { remember(); ed.start = Math.min(edv.currentTime, ed.end - 0.5); renderTimeline(); };
+const setEnd = () => { remember(); ed.end = Math.max(edv.currentTime, ed.start + 0.5); renderTimeline(); };
 $("ed-play").onclick = togglePlay;
 $("ed-set-start").onclick = setStart;
 $("ed-set-end").onclick = setEnd;
-$("ed-reset").onclick = () => { if (ed.info) { ed.start = 0; ed.end = ed.info.duration; renderTimeline(); } };
+$("ed-reset").onclick = () => {
+  if (!ed.info) return;
+  remember();
+  ed.start = 0; ed.end = ed.info.duration; ed.segs = [{ a: 0, b: ed.info.duration, keep: true }];
+  renderTimeline();
+};
+$("ed-split").onclick = split;
+$("ed-remove").onclick = toggleRemove;
+$("ed-undo").onclick = () => restore(ed.undo, ed.redo);
+$("ed-redo").onclick = () => restore(ed.redo, ed.undo);
+$("ed-frame-back").onclick = () => stepFrame(-1);
+$("ed-frame-fwd").onclick = () => stepFrame(1);
+$("ed-snap").onclick = saveFrame;
+$("ed-speed").onchange = () => {
+  ed.rate = Number($("ed-speed").value) || 1;
+  edv.playbackRate = ed.rate;
+  if (!edv.paused) startAudio();
+};
 
 window.addEventListener("keydown", (e) => {
-  if ($("view-editor").classList.contains("hidden") || listening || e.target.tagName === "INPUT" || !ed.info) return;
-  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  if ($("view-editor").classList.contains("hidden") || listening || !ed.info) return;
+  if ((e.target.tagName === "INPUT" && e.target.type !== "checkbox") || e.target.tagName === "SELECT") return;
+  const ctrl = e.ctrlKey || e.metaKey, step = e.shiftKey ? 5 : 1;
+  if (ctrl && e.code === "KeyZ") { e.preventDefault(); e.shiftKey ? restore(ed.redo, ed.undo) : restore(ed.undo, ed.redo); }
+  else if (ctrl && e.code === "KeyY") { e.preventDefault(); restore(ed.redo, ed.undo); }
+  else if (ctrl) return;
+  else if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.code === "KeyI") setStart();
   else if (e.code === "KeyO") setEnd();
-  else if (e.code === "ArrowLeft") seekTo(Math.max(0, (ed.shownTime ?? edv.currentTime) - 1));
-  else if (e.code === "ArrowRight") seekTo(Math.min(ed.info.duration, (ed.shownTime ?? edv.currentTime) + 1));
+  else if (e.code === "KeyS") split();
+  else if (e.code === "Delete" || e.code === "Backspace") { e.preventDefault(); toggleRemove(); }
+  else if (e.code === "KeyP") saveFrame();
+  else if (e.code === "Comma") stepFrame(-1);
+  else if (e.code === "Period") stepFrame(1);
+  else if (e.code === "Home") { e.preventDefault(); seekTo(ed.start); }
+  else if (e.code === "End") { e.preventDefault(); seekTo(Math.max(ed.start, ed.end - 0.05)); }
+  else if (e.code === "ArrowLeft") seekTo(Math.max(0, edNow() - step));
+  else if (e.code === "ArrowRight") seekTo(Math.min(ed.info.duration, edNow() + step));
 });
 
 async function closeEditor() {
@@ -218,6 +327,7 @@ $("ed-back").onclick = closeEditor;
 
 $("ed-export").onclick = async () => {
   if (!ed.info || ed.busy) return;
+  if (!keepRanges().length) { $("ed-status").textContent = "Nothing left to save: every part is cut out"; return; }
   ed.busy = true;
   $("ed-export").disabled = true;
   edv.pause();
@@ -226,6 +336,7 @@ $("ed-export").onclick = async () => {
     const out = await invoke("editor_export", { request: {
       path: ed.info.path, start: ed.start, end: ed.end,
       volumes: ed.tracks.map((t) => t.gain.gain.value),
+      keep: keepRanges(), fade: $("ed-fade").checked ? 0.5 : 0,
     } });
     await closeEditor();
     say("Saved: " + out);
