@@ -472,7 +472,7 @@ pub async fn export(
         } else {
         match (reencode, encoder) {
             (false, _) => { c.args(["-c:v", "copy"]); }
-            (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
+            (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
             (true, "h264_amf") => { c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
             (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
             (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
@@ -504,7 +504,9 @@ pub async fn export(
     let mut last_err = None;
     let gpu = crate::gpu::detect().ffmpeg_encoder();
     let mut encoders: Vec<(&'static str, bool)> = vec![];
-    if gpu == "h264_nvenc" && fit_kbps.is_some() && !video_graph {
+    // Everything on the graphics card whenever the video is re-encoded, except
+    // fades (no CUDA fade filter: those go through the CPU path below).
+    if gpu == "h264_nvenc" && reencode && fade == 0.0 {
         encoders.push((gpu, true));
     }
     if gpu != "libx264" {
@@ -637,7 +639,7 @@ pub async fn combine(tools: &Tools, out_dir: &Path, paths: &[PathBuf], progress:
         }
         c.args(["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"]);
         match encoder {
-            "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]),
+            "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]),
             "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23", "-g", "60"]),
             "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]),
             _ => c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]),
@@ -731,5 +733,33 @@ mod cut_tests {
         println!("cut {} (expected {:.2} s)", p.display(), d * 0.3 - 0.5 + d * 0.2 + d * 0.2 - 0.5);
         let f = super::save_frame(&tools, &info, d / 2.0).await.unwrap();
         println!("frame {}", f.display());
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    /// cargo test editor_perf -- --ignored --nocapture  (CLIPPER_TEST_CLIP, CLIPPER_TEST_OUT)
+    #[tokio::test]
+    #[ignore]
+    async fn editor_perf() {
+        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
+        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
+        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
+        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
+        crate::log::init(out.join("clipper.log"));
+        let d = info.duration;
+        let cases = [
+            ("trim", vec![], 0.0),
+            ("cut", vec![(5.0, 20.0), (30.0, d - 5.0)], 0.0),
+            ("trim+fade", vec![], 0.5),
+        ];
+        for (name, keep, fade) in cases {
+            let req = super::ExportRequest {
+                path: info.path.clone(), start: 5.0, end: d - 5.0, volumes: vec![], target_mb: None, keep, fade,
+            };
+            let t0 = std::time::Instant::now();
+            let p = super::export(&tools, &out, &info, &req, |_| {}).await.unwrap();
+            println!("{name}: {:.1} s -> {}", t0.elapsed().as_secs_f64(), p.display());
+        }
     }
 }

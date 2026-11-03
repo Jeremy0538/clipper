@@ -4,6 +4,9 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.10
+- Saving in the editor is about twice as fast on NVIDIA cards (trimming, cutting and combining clips), at the same size and quality.
+
 ## 0.4.9
 - Editor: a **Delete the original** option next to Save. The original goes to the recycle bin and its star moves to the new clip. Clipper remembers your choice.
 - Editor: a part you removed can always be restored, even when every part is removed. Shortcuts keep working after you pick a preview speed, and holding a key no longer repeats Split or Save frame.
