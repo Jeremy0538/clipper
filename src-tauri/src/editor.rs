@@ -200,12 +200,19 @@ pub async fn save_frame(tools: &Tools, info: &ClipInfo, time: f64) -> Result<Pat
     }
     let part = out.with_extension("part.png");
     let mut c = command(&tools.ffmpeg);
-    c.args(["-hide_banner", "-v", "error", "-y", "-ss", &format!("{:.3}", time.clamp(0.0, info.duration))])
+    c.args(["-hide_banner", "-v", "error", "-y", "-ss", &format!("{:.3}", time.clamp(0.0, (info.duration - 1.0 / info.fps.max(1.0)).max(0.0)))])
         .arg("-i").arg(src)
         .args(["-map", "0:v:0", "-frames:v", "1", "-update", "1", "-f", "image2", "-c:v", "png"])
         .arg(&part);
-    run(c).await.context("could not save the frame")?;
-    std::fs::rename(&part, &out)?;
+    let done = match run(c).await.context("could not save the frame") {
+        Ok(_) if part.exists() => std::fs::rename(&part, &out).context("could not save the frame"),
+        Ok(_) => Err(anyhow::anyhow!("no picture at this point of the clip")),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
     Ok(out)
 }
 
@@ -291,7 +298,14 @@ pub async fn export(
     // Which sources carry sound in the range?
     let mut keep: Vec<(&Track, f64)> = vec![];
     for (t, &v) in info.sources.iter().zip(req.volumes.iter().chain(std::iter::repeat(&1.0))) {
-        let peak = peak_db(tools, src, t.index, start, end).await.unwrap_or(0.0);
+        // Only the kept parts count: sound in a cut-out part doesn't make a track worth keeping.
+        let mut peak = f64::NEG_INFINITY;
+        for &(a, b) in &ranges {
+            peak = peak.max(peak_db(tools, src, t.index, a, b).await.unwrap_or(0.0));
+            if peak > SILENT_DB {
+                break;
+            }
+        }
         if peak > SILENT_DB {
             keep.push((t, v));
         } else {
@@ -321,79 +335,98 @@ pub async fn export(
     // `on_gpu`: NVIDIA fit-to-size keeps every frame on the graphics card (CUDA
     // decode → scale_cuda → NVENC). Copying 3440×1440 frames to the CPU and back
     // made a 60 s clip take ~50 s.
+    // Mix + every kept source as its own track (so the clip can be edited again).
+    let sources_mapped = fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1);
     let attempt = |encoder: &'static str, on_gpu: bool| {
         let mut c = command(&tools.ffmpeg);
         c.args(["-hide_banner", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]);
-        if on_gpu {
-            c.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
-        } else if reencode {
-            // GPU decoding for what gets re-encoded (falls back to CPU by itself).
-            c.args(["-hwaccel", "auto"]);
+        let hw = |c: &mut tokio::process::Command| {
+            if on_gpu {
+                c.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+            } else if reencode {
+                // GPU decoding for what gets re-encoded (falls back to CPU by itself).
+                c.args(["-hwaccel", "auto"]);
+            }
+        };
+        if cut {
+            // One input per kept part: ffmpeg only decodes what is kept.
+            for (a, b) in &ranges {
+                hw(&mut c);
+                c.args(["-ss", &format!("{a:.3}"), "-to", &format!("{b:.3}"), "-i"]).arg(src);
+            }
+        } else {
+            hw(&mut c);
+            if trimmed {
+                c.args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
+            }
+            c.arg("-i").arg(src);
         }
-        if trimmed {
-            c.args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")]);
-        }
-        c.arg("-i").arg(src);
-        let sources_mapped = fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1);
         let in_mix = |i: usize| mixed.iter().any(|(t, _)| t.index == i);
-        let mapped = |i: usize| sources_mapped && keep.iter().any(|(t, _)| t.index == i);
-        let mut graph = String::new();
-        // Label for each audio track's sound, ready to use once (for the Mix)
-        // and once more (as its own track) where needed.
-        let mix_in: Vec<String>;
-        let out_audio: Vec<String>;
+        // Filter chains, joined with ';'. A filter output can be used only once;
+        // an input stream ([0:a:1]) as often as needed.
+        let mut graph: Vec<String> = vec![];
+        let mut mix_label = std::collections::HashMap::new();
+        let mut own_label = std::collections::HashMap::new();
         let video_label: String;
         if cut {
-            // After -ss the input starts at 0: times are relative to `start`.
-            let used: Vec<usize> = keep.iter().map(|(t, _)| t.index).filter(|&i| in_mix(i) || mapped(i)).collect();
-            for (k, (a, b)) in ranges.iter().enumerate() {
-                let (a, b) = (a - start, b - start);
-                graph += &format!("[0:v:0]trim=start={a:.3}:end={b:.3},setpts=PTS-STARTPTS[v{k}];");
-                for &i in &used {
-                    graph += &format!("[0:a:{i}]atrim=start={a:.3}:end={b:.3},asetpts=PTS-STARTPTS[a{i}_{k}];");
-                }
-            }
+            let used: Vec<usize> = keep.iter().map(|(t, _)| t.index).filter(|&i| sources_mapped || in_mix(i)).collect();
+            let mut chain = String::new();
             for k in 0..ranges.len() {
-                graph += &format!("[v{k}]");
+                chain += &format!("[{k}:v:0]");
                 for &i in &used {
-                    graph += &format!("[a{i}_{k}]");
+                    chain += &format!("[{k}:a:{i}]");
                 }
             }
-            graph += &format!("concat=n={}:v=1:a={}[vc]", ranges.len(), used.len());
+            chain += &format!("concat=n={}:v=1:a={}[vc]", ranges.len(), used.len());
             for &i in &used {
-                graph += &format!("[c{i}]");
+                chain += &format!("[c{i}]");
             }
-            graph += ";";
+            graph.push(chain);
             for &i in &used {
-                if in_mix(i) && mapped(i) {
-                    graph += &format!("[c{i}]asplit=2[m{i}][o{i}];");
+                if in_mix(i) && sources_mapped {
+                    graph.push(format!("[c{i}]asplit=2[m{i}][o{i}]"));
+                    mix_label.insert(i, format!("[m{i}]"));
+                    own_label.insert(i, format!("[o{i}]"));
+                } else if in_mix(i) {
+                    mix_label.insert(i, format!("[c{i}]"));
+                } else {
+                    own_label.insert(i, format!("[c{i}]"));
                 }
             }
-            // Mix inputs in `mixed` order (that is the volume order), own tracks in `keep` order.
-            let both = |i: usize| in_mix(i) && mapped(i);
-            mix_in = mixed.iter().map(|(t, _)| format!("[{}{}]", if both(t.index) { 'm' } else { 'c' }, t.index)).collect();
-            out_audio = keep.iter().filter(|(t, _)| mapped(t.index))
-                .map(|(t, _)| format!("[{}{}]", if both(t.index) { 'o' } else { 'c' }, t.index)).collect();
             video_label = "[vc]".into();
         } else {
-            mix_in = mixed.iter().map(|(t, _)| format!("[0:a:{}]", t.index)).collect();
-            out_audio = keep.iter().filter(|(t, _)| mapped(t.index)).map(|(t, _)| format!("0:a:{}", t.index)).collect();
+            for (t, _) in &keep {
+                mix_label.insert(t.index, format!("[0:a:{}]", t.index));
+                own_label.insert(t.index, format!("[0:a:{}]", t.index));
+            }
             video_label = "[0:v:0]".into();
         }
+        let afade = format!("afade=t=in:st=0:d={fade:.3},afade=t=out:st={:.3}:d={fade:.3}", length - fade);
         if !mixed.is_empty() {
-            for (k, ((_, v), l)) in mixed.iter().zip(&mix_in).enumerate() {
-                graph += &format!("{l}volume={:.3}[s{k}];", v.clamp(0.0, 20.0));
+            for (k, (t, v)) in mixed.iter().enumerate() {
+                graph.push(format!("{}volume={:.3}[s{k}]", mix_label[&t.index], v.clamp(0.0, 20.0)));
             }
-            let fades = if fade > 0.0 {
-                format!(",afade=t=in:st=0:d={fade:.3},afade=t=out:st={:.3}:d={fade:.3}", length - fade)
-            } else { String::new() };
-            if mixed.len() == 1 {
-                graph += &format!("[s0]anull{fades}[mix]");
+            let fades = if fade > 0.0 { format!(",{afade}") } else { String::new() };
+            let ins: String = (0..mixed.len()).map(|k| format!("[s{k}]")).collect();
+            graph.push(if mixed.len() == 1 {
+                format!("[s0]anull{fades}[mix]")
             } else {
-                for k in 0..mixed.len() {
-                    graph += &format!("[s{k}]");
+                format!("{ins}amix=inputs={}:normalize=0:dropout_transition=0{fades}[mix]", mixed.len())
+            });
+        }
+        // The sources' own tracks: faded like the Mix, or straight from the input.
+        let mut own_maps: Vec<String> = vec![];
+        if sources_mapped {
+            for (k, (t, _)) in keep.iter().enumerate() {
+                let l = &own_label[&t.index];
+                if fade > 0.0 {
+                    graph.push(format!("{l}{afade}[f{k}]"));
+                    own_maps.push(format!("[f{k}]"));
+                } else if cut {
+                    own_maps.push(l.clone());
+                } else {
+                    own_maps.push(format!("0:a:{}", t.index));
                 }
-                graph += &format!("amix=inputs={}:normalize=0:dropout_transition=0{fades}[mix]", mixed.len());
             }
         }
         let mut vf: Vec<String> = vec![];
@@ -404,26 +437,19 @@ pub async fn export(
             vf.push(if on_gpu { format!("scale_cuda=-2:{h}") } else { format!("scale=-2:{h}") });
         }
         let video_map = if video_graph {
-            if !graph.is_empty() && !graph.ends_with(';') {
-                graph += ";";
-            }
-            if vf.is_empty() {
-                graph += &format!("{video_label}null[vout]");
-            } else {
-                graph += &format!("{video_label}{}[vout]", vf.join(","));
-            }
+            let f = if vf.is_empty() { "null".to_string() } else { vf.join(",") };
+            graph.push(format!("{video_label}{f}[vout]"));
             "[vout]".to_string()
         } else {
             "0:v:0".to_string()
         };
-        let graph = graph.trim_end_matches(';').to_string();
         if !graph.is_empty() {
-            c.args(["-filter_complex", &graph]);
+            c.args(["-filter_complex", &graph.join(";")]);
         }
         c.args(["-map", &video_map]);
         if !mixed.is_empty() {
             c.args(["-map", "[mix]"]);
-            for l in &out_audio {
+            for l in &own_maps {
                 c.args(["-map", l]);
             }
         }
@@ -454,7 +480,7 @@ pub async fn export(
             let ab = if fit_kbps.is_some() { "128k" } else { "160k" }; // same as OBS
             c.args(["-c:a:0", "aac", "-b:a:0", ab, "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix"]);
             if sources_mapped {
-                for (k, (t, _)) in keep.iter().filter(|(t, _)| mapped(t.index)).enumerate() {
+                for (k, (t, _)) in keep.iter().enumerate() {
                     let o = k + 1;
                     if reencode {
                         c.args([format!("-c:a:{o}"), "aac".into(), format!("-b:a:{o}"), "160k".into()]);

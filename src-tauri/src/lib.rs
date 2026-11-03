@@ -1041,8 +1041,8 @@ async fn editor_frame(app: AppHandle, time: f64) -> Result<String, String> {
         .await
         .map_err(|e| { clog!("ERROR editor frame: {e:#}"); format!("{e:#}") })?;
     clog!("editor: saved frame {}", out.display());
+    // A small PNG: no storage-limit run (it could delete the clip being edited).
     let _ = app.emit("clip-saved", out.to_string_lossy());
-    after_new_file(&app).await;
     Ok(out.to_string_lossy().into_owned())
 }
 

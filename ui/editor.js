@@ -63,9 +63,11 @@ async function openEditor(c) {
     stopAudio();
     ed.info = info; ed.start = 0; ed.end = info.duration;
     ed.segs = [{ a: 0, b: info.duration, keep: true }]; ed.undo = []; ed.redo = [];
-    edv.playbackRate = ed.rate;
     $("ed-scrub").classList.remove("on");
+    // A new source resets playbackRate to defaultPlaybackRate: set both.
+    edv.defaultPlaybackRate = ed.rate;
     edv.src = convertFileSrc(info.path);
+    edv.playbackRate = ed.rate;
     ed.ctx = ed.ctx || new AudioContext();
     ed.tracks = [];
     const tracks = [];
@@ -167,16 +169,23 @@ function renderTimeline() {
   const now = ed.shownTime ?? edv.currentTime ?? 0;   // follow the mouse while seeking
   $("ed-playhead").style.left = pct(now);
   $("ed-time").textContent = `${fmtT(now)} / ${fmtT(d)}`;
-  $("ed-length").textContent = "Length " + fmtT(keptLength());
+
   const cur = segAt(now);
-  const marks = [];
-  for (const s of ed.segs) {
-    if (!s.keep) { const e = document.createElement("div"); e.className = "ed-cut"; e.style.left = pct(s.a); e.style.width = pct(s.b - s.a); marks.push(e); }
-    if (s.a > 0) { const e = document.createElement("div"); e.className = "ed-split"; e.style.left = pct(s.a); marks.push(e); }
+  // Rebuilt only when the parts, the trim or the current part change (this runs every frame).
+  const key = `${ed.start}-${ed.end}#` + ed.segs.map((s) => `${s.a}-${s.b}-${s.keep}`).join("|") + "#" + (cur?.a ?? "");
+  if (key !== ed.marksKey) {
+    ed.marksKey = key;
+    ed.keptLength = keptLength();
+    const mark = (cls, a, b) => { const e = document.createElement("div"); e.className = cls; e.style.left = pct(a); if (b != null) e.style.width = pct(b - a); return e; };
+    const marks = [];
+    for (const s of ed.segs) {
+      if (!s.keep) marks.push(mark("ed-cut", s.a, s.b));
+      if (s.a > 0) marks.push(mark("ed-split", s.a));
+    }
+    if (cur && ed.segs.length > 1) marks.push(mark("ed-cur", cur.a, cur.b));
+    $("ed-cuts").replaceChildren(...marks);
   }
-  if (cur && ed.segs.length > 1) { const e = document.createElement("div"); e.className = "ed-cur"; e.style.left = pct(cur.a); e.style.width = pct(cur.b - cur.a); marks.push(e); }
-  const key = ed.segs.map((s) => `${s.a}-${s.b}-${s.keep}`).join("|") + "#" + (cur?.a ?? "");
-  if (key !== ed.marksKey) { ed.marksKey = key; $("ed-cuts").replaceChildren(...marks); }
+  $("ed-length").textContent = "Length " + fmtT(ed.keptLength);
   $("ed-remove").textContent = cur && !cur.keep ? "Restore part (Del)" : "Remove part (Del)";
   $("ed-remove").disabled = ed.segs.length < 2;
   $("ed-undo").disabled = !ed.undo.length;
@@ -185,18 +194,10 @@ function renderTimeline() {
 
 // --- parts, undo ---
 const segAt = (t) => ed.segs.find((s) => t >= s.a && t < s.b) || ed.segs[ed.segs.length - 1];
-// Kept parts inside start..end, neighbours merged (what gets saved).
-function keepRanges() {
-  const out = [];
-  for (const s of ed.segs) {
-    if (!s.keep) continue;
-    const a = Math.max(s.a, ed.start), b = Math.min(s.b, ed.end);
-    if (b - a < 0.1) continue;
-    if (out.length && a <= out[out.length - 1][1] + 0.02) out[out.length - 1][1] = b; else out.push([a, b]);
-  }
-  return out;
-}
-const keptLength = () => keepRanges().reduce((n, [a, b]) => n + b - a, 0);
+// Kept parts as sent to the app; the app clamps them to start..end and merges them
+// (editor::keep_ranges). Here only for the "Length" display.
+const keptParts = () => ed.segs.filter((s) => s.keep).map((s) => [s.a, s.b]);
+const keptLength = () => keptParts().reduce((n, [a, b]) => n + Math.max(0, Math.min(b, ed.end) - Math.max(a, ed.start)), 0);
 const snapshot = () => JSON.stringify({ start: ed.start, end: ed.end, segs: ed.segs });
 function remember() { ed.undo.push(snapshot()); if (ed.undo.length > 100) ed.undo.shift(); ed.redo = []; }
 function restore(from, to) {
@@ -219,14 +220,7 @@ function toggleRemove() {
   if (!ed.info || ed.segs.length < 2) return;
   const s = segAt(edNow());
   remember();
-  s.keep = !s.keep;
-  // Cut-out neighbours become one part (kept parts keep their splits).
-  const merged = [];
-  for (const x of ed.segs) {
-    const l = merged[merged.length - 1];
-    if (l && l.keep === x.keep && !x.keep) l.b = x.b; else merged.push({ ...x });
-  }
-  ed.segs = merged;
+  s.keep = !s.keep;   // parts are never merged, so each one can always be brought back
   renderTimeline();
 }
 function stepFrame(n) {
@@ -236,7 +230,7 @@ function stepFrame(n) {
 }
 async function saveFrame() {
   if (!ed.info) return;
-  try { const out = await invoke("editor_frame", { time: edNow() }); say("Saved frame: " + out); }
+  try { await invoke("editor_frame", { time: edNow() }); }   // "clip-saved" shows the message
   catch (err) { $("ed-status").textContent = "Could not save the frame: " + err; }
 }
 
@@ -248,7 +242,7 @@ let dragging = null;
 $("ed-timeline").onpointerdown = (ev) => {
   if (!ed.info) return;
   dragging = ev.target.id === "ed-h-start" ? "start" : ev.target.id === "ed-h-end" ? "end" : "seek";
-  if (dragging !== "seek") remember();
+  ed.dragFrom = dragging !== "seek" ? snapshot() : null;
   $("ed-timeline").setPointerCapture(ev.pointerId);
   $("ed-timeline").onpointermove(ev);
 };
@@ -260,7 +254,13 @@ $("ed-timeline").onpointermove = (ev) => {
   else preview(Math.max(ed.start, Math.min(t, ed.end)));
   renderTimeline();
 };
-$("ed-timeline").onpointerup = () => { if (dragging) endPreview(); dragging = null; };
+$("ed-timeline").onpointerup = () => {
+  if (dragging) endPreview();
+  // Only a handle that actually moved is an undo step (a plain click must not wipe Redo).
+  if (ed.dragFrom && ed.dragFrom !== snapshot()) { ed.undo.push(ed.dragFrom); ed.redo = []; }
+  ed.dragFrom = null;
+  dragging = null;
+};
 $("ed-timeline").onpointercancel = $("ed-timeline").onpointerup;
 
 const togglePlay = () => {
@@ -290,8 +290,10 @@ $("ed-frame-fwd").onclick = () => stepFrame(1);
 $("ed-snap").onclick = saveFrame;
 $("ed-speed").onchange = () => {
   ed.rate = Number($("ed-speed").value) || 1;
+  edv.defaultPlaybackRate = ed.rate;
   edv.playbackRate = ed.rate;
   if (!edv.paused) startAudio();
+  $("ed-speed").blur();   // keep the editor's keys working (arrows would change the speed)
 };
 
 window.addEventListener("keydown", (e) => {
@@ -301,6 +303,8 @@ window.addEventListener("keydown", (e) => {
   if (ctrl && e.code === "KeyZ") { e.preventDefault(); e.shiftKey ? restore(ed.redo, ed.undo) : restore(ed.undo, ed.redo); }
   else if (ctrl && e.code === "KeyY") { e.preventDefault(); restore(ed.redo, ed.undo); }
   else if (ctrl) return;
+  // Held keys only repeat for moving around, not for actions (P would save dozens of pictures).
+  else if (e.repeat && !["ArrowLeft", "ArrowRight", "Comma", "Period"].includes(e.code)) { if (e.code === "Space") e.preventDefault(); return; }
   else if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.code === "KeyI") setStart();
   else if (e.code === "KeyO") setEnd();
@@ -327,7 +331,7 @@ $("ed-back").onclick = closeEditor;
 
 $("ed-export").onclick = async () => {
   if (!ed.info || ed.busy) return;
-  if (!keepRanges().length) { $("ed-status").textContent = "Nothing left to save: every part is cut out"; return; }
+  if (keptLength() < 0.1) { $("ed-status").textContent = "Nothing left to save: every part is cut out"; return; }
   ed.busy = true;
   $("ed-export").disabled = true;
   edv.pause();
@@ -336,7 +340,7 @@ $("ed-export").onclick = async () => {
     const out = await invoke("editor_export", { request: {
       path: ed.info.path, start: ed.start, end: ed.end,
       volumes: ed.tracks.map((t) => t.gain.gain.value),
-      keep: keepRanges(), fade: $("ed-fade").checked ? 0.5 : 0,
+      keep: keptParts(), fade: $("ed-fade").checked ? 0.5 : 0,
     } });
     await closeEditor();
     say("Saved: " + out);

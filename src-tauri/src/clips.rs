@@ -213,8 +213,12 @@ fn videos_in(dir: &Path, folder: &str) -> Vec<ClipInfo> {
         .filter_map(|e| {
             let p = e.path();
             let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+            // "<name>.part.<ext>" is a file that is still being written.
+            if p.file_stem()?.to_string_lossy().ends_with(".part") {
+                return None;
+            }
             let kind = match ext.as_str() {
-                "mp4" | "mkv" | "mov" if !p.to_string_lossy().ends_with(".part.mp4") => "video",
+                "mp4" | "mkv" | "mov" => "video",
                 "png" | "jpg" => "image",
                 _ => return None,
             };
