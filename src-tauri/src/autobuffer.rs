@@ -42,7 +42,13 @@ pub async fn run(app: AppHandle) {
         match found {
             Some(g) => {
                 misses = 0;
-                if current.as_ref().map(|c| c.pid) != Some(g.pid) {
+                if current.as_ref().is_some_and(|c| c.name == g.name && c.pid != g.pid) {
+                    // Same game, other process (launcher → game window): follow it
+                    // without treating it as a new game (that would undo a stop by
+                    // hand and repeat "Game detected").
+                    clog!("{}: now pid {} (window \"{}\")", g.name, g.pid, g.obs_window);
+                    current = Some(g);
+                } else if current.as_ref().map(|c| c.pid) != Some(g.pid) {
                     st.user_stopped.store(false, Ordering::SeqCst);
                     clog!("game detected: {} (pid {}, window \"{}\")", g.name, g.pid, g.obs_window);
                     notify::info(&app, "Game detected", g.name.clone());
@@ -125,7 +131,7 @@ pub async fn run(app: AppHandle) {
             targeted = Some(want);
         }
 
-        if !buffer && !st.user_stopped.load(Ordering::SeqCst) {
+        if !buffer && !st.user_stopped.load(Ordering::SeqCst) && !st.buffer_changing.load(Ordering::SeqCst) {
             if !crate::modes::game_started(&app).await {
                 continue; // a screen recording is running: leave it alone
             }

@@ -56,6 +56,15 @@ impl ObsClient {
     }
 
     pub async fn connect(&self, port: u16, password: &str) -> Result<()> {
+        // Something that accepts the TCP connection but never finishes the
+        // handshake (a half-started OBS, another program on the port) must not
+        // hang the caller: its own retry/exit checks have to keep running.
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.connect_inner(port, password))
+            .await
+            .context("OBS websocket handshake timed out")?
+    }
+
+    async fn connect_inner(&self, port: u16, password: &str) -> Result<()> {
         let (ws, _) = connect_async(format!("ws://127.0.0.1:{port}")).await?;
         let (mut sink, mut stream) = ws.split();
 

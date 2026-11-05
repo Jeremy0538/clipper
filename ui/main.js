@@ -196,6 +196,7 @@ function clipCard(c) {
         try { await invoke("rename_clip", { path: c.path, name: inp.value.trim() }); say("Renamed."); }
         catch (err) { say(err); }
       }
+      inp.replaceWith(nameEl); // the card may be reused when nothing changed
       loadClips();
     };
     inp.onkeydown = (e) => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); e.stopPropagation(); };
@@ -204,10 +205,11 @@ function clipCard(c) {
   const star = el.querySelector(".star");
   star.classList.toggle("on", !!c.favorite);
   star.onclick = () => {
-    c.favorite = !c.favorite;
-    star.classList.toggle("on", c.favorite);
-    invoke("set_favorite", { path: c.path, on: c.favorite })
-      .then(() => { say(c.favorite ? "Starred: the storage limit never deletes it." : "Star removed."); loadClips(); }, say);
+    const on = !c.favorite;
+    star.classList.toggle("on", on);
+    invoke("set_favorite", { path: c.path, on })
+      .then(() => { c.favorite = on; say(on ? "Starred: the storage limit never deletes it." : "Star removed."); loadClips(); },
+        (err) => { star.classList.toggle("on", !on); say(err); }); // not stored: don't show it as starred
   };
   el.querySelector(".sub").textContent =
     `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
@@ -310,7 +312,22 @@ async function shareClip(btn, c, mb) {
 
 let folderFilter = "";
 const STARRED = "\u0000starred";   // filter value for "only starred clips"
-async function loadClips() {
+// Cards are reused while their clip is unchanged: rebuilding every card (and
+// its <video> thumbnail) on each star, rename or saved clip was slow with many clips.
+const cardCache = new Map();
+const cardKey = (c) => [c.path, c.name, c.modified, c.size, !!c.favorite, c.folder].join("\u0001");
+// One load at a time; calls during a load ask for one more run afterwards, so
+// an older answer can never be drawn over a newer one.
+let clipsLoading = null, clipsAgain = false;
+function loadClips() {
+  if (clipsLoading) { clipsAgain = true; return clipsLoading; }
+  clipsLoading = loadClipsNow().catch((e) => say(e)).finally(() => {
+    clipsLoading = null;
+    if (clipsAgain) { clipsAgain = false; loadClips(); }
+  });
+  return clipsLoading;
+}
+async function loadClipsNow() {
   const all = await invoke("list_clips");
   const folders = [...new Set(all.map((c) => c.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const anyStar = all.some((c) => c.favorite);
@@ -326,7 +343,16 @@ async function loadClips() {
   $("folders").classList.toggle("hidden", chips.length < 3 && !anyStar);
   const clips = folderFilter === STARRED ? all.filter((c) => c.favorite)
     : folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
-  $("clips").replaceChildren(...clips.map(clipCard));
+  const fresh = new Map();
+  const cards = clips.map((c) => {
+    const k = cardKey(c);
+    const el = cardCache.get(k) || clipCard(c);
+    fresh.set(k, el);
+    return el;
+  });
+  cardCache.clear();
+  for (const [k, el] of fresh) cardCache.set(k, el);
+  $("clips").replaceChildren(...cards);
   selected = selected.filter((p) => all.some((c) => c.path === p));
   syncSelection();
   const gb = clips.reduce((n, c) => n + c.size, 0) / 1e9;
@@ -540,7 +566,10 @@ $("install-update").onclick = async () => {
     $("install-update").disabled = $("check-update").disabled = false;
   }
 };
-listen("update-available", (e) => showUpdate(e.payload));
+listen("update-available", (e) => {
+  showUpdate(e.payload);
+  say(`Clipper ${e.payload.version} is available: Settings → Updates → Install.`);
+});
 listen("update-progress", (e) => { $("update-text").textContent = `Downloading… ${e.payload}%`; });
 
 // ---------- settings: games ----------

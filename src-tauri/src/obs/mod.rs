@@ -76,6 +76,9 @@ impl ObsManager {
     }
 
     async fn run_once(&self, report: &impl Fn(String)) -> Result<()> {
+        // Before an install too: a leftover OBS running from <data>/obs keeps its
+        // files locked, and the install could never replace them.
+        self.kill_orphans().await;
         #[cfg(windows)]
         {
             let root = self.data_dir.join("obs");
@@ -113,9 +116,13 @@ impl ObsManager {
             cmd.env("XDG_CONFIG_HOME", x);
         }
         report("starting".into());
-        self.kill_orphans().await;
         let mut child = cmd.spawn()?;
-        *self.pid.lock().unwrap() = child.id();
+        // Cleared on every way out of here (errors too): a stale PID could be
+        // reused by Windows, and restart()/shutdown() would kill that program.
+        let _pid = PidGuard::set(&self.pid, child.id());
+        // Tells the tray-icon task this OBS is gone (its PID may be reused).
+        let alive = Arc::new(AtomicBool::new(true));
+        let _alive = AliveGuard(alive.clone());
         #[cfg(windows)]
         if let Some(pid) = child.id() {
             tie_to_clipper(pid);
@@ -173,9 +180,10 @@ impl ObsManager {
         // user should see: remove OBS's icon (again after an Explorer restart).
         #[cfg(windows)]
         if let Some(pid) = child.id() {
+            let alive = alive.clone();
             tokio::spawn(async move {
                 let mut logged = false;
-                for _ in 0..100_000 {
+                while alive.load(Ordering::SeqCst) {
                     let n = tokio::task::spawn_blocking(move || hide_tray_icon(pid)).await.unwrap_or(-1);
                     if n < 0 {
                         break; // OBS is gone
@@ -190,7 +198,7 @@ impl ObsManager {
         }
 
         let status = child.wait().await?;
-        *self.pid.lock().unwrap() = None;
+        drop(_pid);
         if self.restarting.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
@@ -264,17 +272,20 @@ impl ObsManager {
     }
 
     /// Restart OBS so it picks up new encoder settings (only while it's idle).
+    /// Doesn't block: the kill runs on its own thread (callers include the event loop).
     pub fn restart(&self) {
         let Some(pid) = *self.pid.lock().unwrap() else { return };
         self.restarting.store(true, Ordering::SeqCst);
         let pid = pid.to_string();
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).creation_flags(0x0800_0000).status();
-        }
-        #[cfg(not(windows))]
-        let _ = std::process::Command::new("kill").args(["-TERM", &pid]).status();
+        std::thread::spawn(move || {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid]).creation_flags(crate::NO_WINDOW).status();
+            }
+            #[cfg(not(windows))]
+            let _ = std::process::Command::new("kill").args(["-TERM", &pid]).status();
+        });
     }
 
     /// Stop OBS for good (app is quitting). Gentle first, forced after a few seconds.
@@ -285,7 +296,7 @@ impl ObsManager {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            const NO_WINDOW: u32 = 0x0800_0000;
+            use crate::NO_WINDOW;
             let _ = std::process::Command::new("taskkill").args(["/PID", &pid])
                 .creation_flags(NO_WINDOW).status();
             let id: u32 = pid.parse().unwrap_or(0);
@@ -311,6 +322,30 @@ impl ObsManager {
             }
             let _ = std::process::Command::new("kill").args(["-KILL", &pid]).status();
         }
+    }
+}
+
+/// Holds the running OBS's PID in `ObsManager::pid` and clears it when dropped.
+struct PidGuard<'a>(&'a Mutex<Option<u32>>);
+
+impl<'a> PidGuard<'a> {
+    fn set(slot: &'a Mutex<Option<u32>>, pid: Option<u32>) -> Self {
+        *slot.lock().unwrap() = pid;
+        Self(slot)
+    }
+}
+
+impl Drop for PidGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 

@@ -388,7 +388,7 @@ pub fn copy_file(p: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const NO_WINDOW: u32 = 0x0800_0000;
+        use crate::NO_WINDOW;
         let lit = p.to_string_lossy().replace('\'', "''");
         let ok = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &format!("Set-Clipboard -LiteralPath '{lit}'")])
@@ -439,8 +439,10 @@ pub fn rename(p: &Path, new_name: &str) -> Result<PathBuf, String> {
     if dst == p {
         return Ok(dst);
     }
-    let only_case = dst.to_string_lossy().to_lowercase() == p.to_string_lossy().to_lowercase();
-    if dst.exists() && !only_case {
+    // Only the case changes: fine where that is the same file (Windows), but on a
+    // case-sensitive drive "Goal.mp4" can be another clip that rename would replace.
+    let same_file = |a: &Path, b: &Path| matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+    if dst.exists() && !same_file(p, &dst) {
         return Err("A clip with that name already exists".into());
     }
     fs::rename(p, &dst).map_err(|e| e.to_string())?;
@@ -449,6 +451,10 @@ pub fn rename(p: &Path, new_name: &str) -> Result<PathBuf, String> {
 
 /// Starred clips, stored as paths in <data>/favorites.json.
 pub struct Favorites(PathBuf);
+
+/// Serializes favorites.json read-modify-writes (stars and renames run on
+/// different blocking threads; two at once would lose one change).
+static FAV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Favorites {
     pub fn new(data_dir: &Path) -> Self {
@@ -459,28 +465,34 @@ impl Favorites {
         // Keys (see fav_key); older files hold paths in other spellings.
         v.iter().map(|p| fav_key(p)).collect()
     }
-    fn save(&self, v: &[String]) {
-        let _ = fs::write(&self.0, serde_json::to_string(v).unwrap_or_default());
+    /// Written to a temp file and renamed: a crash mid-write can't empty the list.
+    fn save(&self, v: &[String]) -> Result<(), String> {
+        let tmp = self.0.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_string(v).unwrap_or_default()).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &self.0).map_err(|e| e.to_string())
     }
-    pub fn set(&self, path: &str, on: bool) {
+    pub fn set(&self, path: &str, on: bool) -> Result<(), String> {
+        let _g = FAV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = fav_key(path);
         let mut v = self.load();
         v.retain(|p| *p != key);
         if on {
             v.push(key);
         }
-        self.save(&v);
+        self.save(&v)
     }
     /// After a rename: `from_key` is fav_key of the old path, taken before the rename.
     pub fn moved(&self, from_key: &str, to: &str) {
+        let _g = FAV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut v = self.load();
         if let Some(p) = v.iter_mut().find(|p| *p == from_key) {
             *p = fav_key(to);
-            self.save(&v);
+            let _ = self.save(&v);
         }
     }
     /// After moving many files: (fav_key of the old path, new path).
     pub fn moved_many(&self, moves: &[(String, PathBuf)]) {
+        let _g = FAV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut v = self.load();
         let mut changed = false;
         for (from_key, to) in moves {
@@ -490,7 +502,7 @@ impl Favorites {
             }
         }
         if changed {
-            self.save(&v);
+            let _ = self.save(&v);
         }
     }
     /// Is this clip (path as listed) starred? `favs` comes from load().
@@ -557,7 +569,7 @@ mod fav_tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let favs = super::Favorites::new(&base);
         // Starred through the real path (what checked() returns)...
-        favs.set(&real.join("a.mp4").to_string_lossy(), true);
+        favs.set(&real.join("a.mp4").to_string_lossy(), true).unwrap();
         // ...found through the link path (what the clip list shows).
         let loaded = favs.load();
         assert!(super::Favorites::has(&loaded, &link.join("a.mp4").to_string_lossy()));
@@ -595,7 +607,7 @@ mod move_tests {
         std::fs::write(from.join("y.png"), "2").unwrap();
         std::fs::write(from.join(".incoming/busy.mp4"), "3").unwrap();
         let favs = super::Favorites::new(&data);
-        favs.set(&from.join("Game/x.mp4").to_string_lossy(), true);
+        favs.set(&from.join("Game/x.mp4").to_string_lossy(), true).unwrap();
         assert_eq!(super::move_all(&from, &to, &favs), (0, 0), "not marked: not ours");
         super::mark(&from).unwrap();
         assert_eq!(super::move_all(&from, &to, &favs), (2, 0));

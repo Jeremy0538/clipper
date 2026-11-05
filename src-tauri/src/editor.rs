@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -258,6 +259,84 @@ pub fn base_name(stem: &str) -> String {
     if s.is_empty() { "Clip".into() } else { s }
 }
 
+/// Most cut parts the all-GPU path takes on: each part is its own CUDA decoder.
+const MAX_GPU_PARTS: usize = 4;
+/// Set when the all-GPU path failed once; later saves go straight to the CPU path.
+static GPU_PATH_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Pixel format of the first video stream.
+async fn pix_fmt(tools: &Tools, src: &Path) -> Option<String> {
+    let mut c = command(&tools.ffprobe);
+    c.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "default=nw=1:nk=1"]).arg(src);
+    let out = run(c).await.ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// How the video bitrate is chosen: a target (export) or a constant quality (combine).
+enum Rate<'a> {
+    Vbr { b: &'a str, max: &'a str, buf: &'a str, gop: &'a str },
+    Quality,
+}
+
+/// ffmpeg video codec arguments for one encoder. The one place encoder settings live.
+fn video_args(encoder: &str, rate: Rate) -> Vec<String> {
+    let mut a: Vec<&str> = match encoder {
+        "h264_nvenc" => vec!["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr"],
+        "h264_amf" => vec!["-c:v", "h264_amf", "-quality", "quality"],
+        "h264_qsv" => vec!["-c:v", "h264_qsv", "-preset", "medium"],
+        _ => vec!["-c:v", "libx264", "-preset", "veryfast"],
+    };
+    let gop = match rate {
+        Rate::Vbr { b, max, buf, gop } => {
+            if encoder == "h264_amf" {
+                a.extend(["-rc", "vbr_peak"]);
+            }
+            a.extend(["-b:v", b, "-maxrate", max, "-bufsize", buf]);
+            gop
+        }
+        Rate::Quality => {
+            a.extend(match encoder {
+                "h264_nvenc" => &["-cq", "19", "-b:v", "0"][..],
+                "h264_amf" => &["-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23"][..],
+                "h264_qsv" => &["-global_quality", "21"][..],
+                _ => &["-crf", "18"][..],
+            });
+            "60"
+        }
+    };
+    a.extend(["-g", gop]);
+    a.into_iter().map(String::from).collect()
+}
+
+/// Runs an ffmpeg command that writes `-progress pipe:1`, reporting progress
+/// against `total` seconds. stderr is read at the same time: a full stderr pipe
+/// (~4 KB on Windows, e.g. many decode errors) would otherwise stall ffmpeg.
+/// `None` = success, `Some(last error lines)` = failed.
+async fn run_with_progress(mut c: tokio::process::Command, total: f64, progress: &impl Fn(u32)) -> Result<Option<String>> {
+    let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let stderr = child.stderr.take().context("no stderr")?;
+    let errors = tokio::spawn(async move {
+        let mut tail = std::collections::VecDeque::new();
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            if tail.len() == 3 {
+                tail.pop_front();
+            }
+            tail.push_back(l);
+        }
+        tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+    });
+    let mut lines = BufReader::new(child.stdout.take().context("no stdout")?).lines();
+    while let Some(l) = lines.next_line().await? {
+        if let Some(us) = l.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
+            progress(((us / 1e6 / total.max(0.1)) * 100.0).clamp(0.0, 99.0) as u32);
+        }
+    }
+    let status = child.wait().await?;
+    let err = errors.await.unwrap_or_default();
+    Ok(if status.success() { None } else { Some(err) })
+}
+
 pub async fn export(
     tools: &Tools,
     clips_dir: &Path,
@@ -273,7 +352,7 @@ pub async fn export(
     let trimmed = start > 0.05 || end < info.duration - 0.05;
     let length = ranges.iter().map(|(a, b)| b - a).sum::<f64>().max(0.1);
     let fade = if req.fade > 0.0 { req.fade.min(length / 3.0) } else { 0.0 };
-    // Cuts and fades go through the filter graph on the CPU.
+    // Cuts and fades go through the filter graph (on the GPU or the CPU, see `on_gpu`).
     let video_graph = cut || fade > 0.0;
     // Fit-to-size: total bits / seconds, minus the audio, with 7 % headroom for the container.
     // Capped at the "High" recording bitrate: a big limit (Nitro, 1 GB) must not
@@ -339,9 +418,9 @@ pub async fn export(
     let out = crate::clips::free_name(clips_dir, &format!("{} {tag} {stamp}", base_name(&info.name)), Some("mp4"));
     let part = out.with_extension("part.mp4");
 
-    // `on_gpu`: NVIDIA fit-to-size keeps every frame on the graphics card (CUDA
-    // decode → scale_cuda → NVENC). Copying 3440×1440 frames to the CPU and back
-    // made a 60 s clip take ~50 s.
+    // `on_gpu`: on NVIDIA, a re-encode without a fade keeps every frame on the
+    // graphics card (CUDA decode → concat/scale_cuda → NVENC). Copying 3440×1440
+    // frames to the CPU and back made a 60 s clip take ~50 s.
     // Mix + every kept source as its own track (so the clip can be edited again).
     let sources_mapped = fit_kbps.is_none() && (keep.len() > 1 || info.sources.len() > 1);
     let attempt = |encoder: &'static str, on_gpu: bool| {
@@ -461,22 +540,17 @@ pub async fn export(
         if !video_graph && !vf.is_empty() {
             c.args(["-vf", &vf.join(",")]);
         }
-        if let Some(k) = fit_kbps {
-            let (b, buf) = (format!("{k}k"), format!("{}k", k * 2));
-            match encoder {
-                "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
-                "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
-                "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
-                _ => c.args(["-c:v", "libx264", "-preset", "veryfast", "-b:v", &b, "-maxrate", &b, "-bufsize", &buf, "-g", "120"]),
-            };
-        } else {
-        match (reencode, encoder) {
-            (false, _) => { c.args(["-c:v", "copy"]); }
-            (true, "h264_nvenc") => { c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
-            (true, "h264_amf") => { c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
-            (true, "h264_qsv") => { c.args(["-c:v", "h264_qsv", "-preset", "medium", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
-            (true, _) => { c.args(["-c:v", "libx264", "-preset", "veryfast", "-b:v", &sb, "-maxrate", &smax, "-bufsize", &sbuf, "-g", "60"]); }
-        }
+        match (fit_kbps, reencode) {
+            (Some(k), _) => {
+                let (b, buf) = (format!("{k}k"), format!("{}k", k * 2));
+                c.args(video_args(encoder, Rate::Vbr { b: &b, max: &b, buf: &buf, gop: "120" }));
+            }
+            (None, false) => {
+                c.args(["-c:v", "copy"]);
+            }
+            (None, true) => {
+                c.args(video_args(encoder, Rate::Vbr { b: &sb, max: &smax, buf: &sbuf, gop: "60" }));
+            }
         }
         if !on_gpu {
             c.args(["-pix_fmt", "yuv420p"]);
@@ -505,8 +579,18 @@ pub async fn export(
     let gpu = crate::gpu::detect().ffmpeg_encoder();
     let mut encoders: Vec<(&'static str, bool)> = vec![];
     // Everything on the graphics card whenever the video is re-encoded, except
-    // fades (no CUDA fade filter: those go through the CPU path below).
-    if gpu == "h264_nvenc" && reencode && fade == 0.0 {
+    // fades (no CUDA fade filter: those go through the CPU path below). Only for
+    // plain 8-bit 4:2:0 sources: NVDEC can't decode 4:4:4 H.264, and without
+    // the CPU path's `-pix_fmt yuv420p` a 10-bit source would stay 10-bit.
+    // Few cut parts only (one decoder each), and never again this session once
+    // it has failed, so a failing GPU path doesn't double every save.
+    if gpu == "h264_nvenc"
+        && reencode
+        && fade == 0.0
+        && ranges.len() <= MAX_GPU_PARTS
+        && !GPU_PATH_FAILED.load(Ordering::Relaxed)
+        && matches!(pix_fmt(tools, src).await.as_deref(), Some("yuv420p" | "yuvj420p" | "nv12"))
+    {
         encoders.push((gpu, true));
     }
     if gpu != "libx264" {
@@ -515,23 +599,16 @@ pub async fn export(
     encoders.push(("libx264", false));
     for (encoder, on_gpu) in encoders {
         let t0 = std::time::Instant::now();
-        let mut child = attempt(encoder, on_gpu).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        let stdout = child.stdout.take().unwrap();
-        let mut lines = BufReader::new(stdout).lines();
-        while let Some(l) = lines.next_line().await? {
-            if let Some(us) = l.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
-                progress(((us / 1e6 / length) * 100.0).clamp(0.0, 99.0) as u32);
-            }
-        }
-        let output = child.wait_with_output().await?;
-        if output.status.success() {
+        let Some(err) = run_with_progress(attempt(encoder, on_gpu), length, &progress).await? else {
             crate::clog!("export: {encoder}{} {:.1} s for {length:.1} s of video", if on_gpu { " (all on GPU)" } else { "" }, t0.elapsed().as_secs_f64());
             std::fs::rename(&part, &out)?;
             progress(100);
             return Ok(out);
-        }
-        let err = String::from_utf8_lossy(&output.stderr).lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        };
         crate::clog!("export with {encoder}{} failed: {err}", if on_gpu { " (all on GPU)" } else { "" });
+        if on_gpu {
+            GPU_PATH_FAILED.store(true, Ordering::Relaxed);
+        }
         let _ = std::fs::remove_file(&part);
         last_err = Some(err);
         if !reencode {
@@ -539,6 +616,18 @@ pub async fn export(
         }
     }
     bail!("export failed: {}", last_err.unwrap_or_default())
+}
+
+/// Shared setup for the ignored real-ffmpeg tests: CLIPPER_TEST_CLIP and
+/// CLIPPER_TEST_OUT; logs to <out>/clipper.log from the start.
+#[cfg(test)]
+async fn test_env() -> (Tools, PathBuf, ClipInfo) {
+    let clip = PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
+    let out = PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
+    crate::log::init(out.join("clipper.log"));
+    let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
+    let info = open(&tools, &out.join("cache"), &clip).await.unwrap();
+    (tools, out, info)
 }
 
 #[cfg(test)]
@@ -559,10 +648,7 @@ mod real_tests {
     #[tokio::test]
     #[ignore]
     async fn editor_roundtrip() {
-        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
-        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
-        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
-        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
+        let (tools, out, info) = super::test_env().await;
         println!("{info:#?}");
         for (s, e) in [(1.0, 4.0), (0.0, info.duration)] {
             let req = super::ExportRequest { path: info.path.clone(), start: s, end: e, volumes: vec![0.5, 2.0, 1.0], target_mb: None, keep: vec![], fade: 0.0 };
@@ -578,10 +664,7 @@ mod fit_tests {
     #[tokio::test]
     #[ignore]
     async fn editor_fit() {
-        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
-        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
-        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
-        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
+        let (tools, out, info) = super::test_env().await;
         let req = super::ExportRequest { path: info.path.clone(), start: 0.0, end: info.duration, volumes: vec![], target_mb: Some(10.0), keep: vec![], fade: 0.0 };
         let p = super::export(&tools, &out, &info, &req, |_| {}).await.unwrap();
         println!("fit {} -> {:.2} MB", p.display(), std::fs::metadata(&p).unwrap().len() as f64 / 1e6);
@@ -638,28 +721,15 @@ pub async fn combine(tools: &Tools, out_dir: &Path, paths: &[PathBuf], progress:
             c.args(["-hwaccel", "auto", "-i"]).arg(p);
         }
         c.args(["-filter_complex", &graph, "-map", "[v]", "-map", "[a]"]);
-        match encoder {
-            "h264_nvenc" => c.args(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-g", "60"]),
-            "h264_amf" => c.args(["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-qp_b", "23", "-g", "60"]),
-            "h264_qsv" => c.args(["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "21", "-g", "60"]),
-            _ => c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", "60"]),
-        };
+        c.args(video_args(encoder, Rate::Quality));
         c.args(["-c:a", "aac", "-b:a", "192k", "-metadata:s:a:0", "title=Mix", "-metadata:s:a:0", "handler_name=Mix",
                 "-movflags", "+faststart", "-f", "mp4"]).arg(&part);
-        let mut child = c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        while let Some(l) = lines.next_line().await? {
-            if let Some(us) = l.strip_prefix("out_time_us=").and_then(|v| v.parse::<f64>().ok()) {
-                progress(((us / 1e6 / total) * 100.0).clamp(0.0, 99.0) as u32);
-            }
-        }
-        let output = child.wait_with_output().await?;
-        if output.status.success() {
+        let Some(err) = run_with_progress(c, total, &progress).await? else {
             std::fs::rename(&part, &out)?;
             progress(100);
             return Ok(out);
-        }
-        last_err = String::from_utf8_lossy(&output.stderr).lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        };
+        last_err = err;
         crate::clog!("combine with {encoder} failed: {last_err}");
         let _ = std::fs::remove_file(&part);
     }
@@ -720,10 +790,7 @@ mod cut_tests {
     #[tokio::test]
     #[ignore]
     async fn editor_cut() {
-        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
-        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
-        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
-        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
+        let (tools, out, info) = super::test_env().await;
         let d = info.duration;
         let req = super::ExportRequest {
             path: info.path.clone(), start: 0.5, end: d - 0.5, volumes: vec![1.0, 0.5, 2.0], target_mb: None,
@@ -742,12 +809,9 @@ mod perf_tests {
     #[tokio::test]
     #[ignore]
     async fn editor_perf() {
-        let clip = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_CLIP").unwrap());
-        let out = std::path::PathBuf::from(std::env::var("CLIPPER_TEST_OUT").unwrap());
-        let tools = crate::tools::ensure(&out, |_| {}).await.unwrap();
-        let info = super::open(&tools, &out.join("cache"), &clip).await.unwrap();
-        crate::log::init(out.join("clipper.log"));
+        let (tools, out, info) = super::test_env().await;
         let d = info.duration;
+        assert!(d > 40.0, "editor_perf needs a test clip longer than 40 s (the cut case would be a plain trim)");
         let cases = [
             ("trim", vec![], 0.0),
             ("cut", vec![(5.0, 20.0), (30.0, d - 5.0)], 0.0),

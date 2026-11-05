@@ -25,7 +25,7 @@ pub fn command(exe: &Path) -> tokio::process::Command {
     #[allow(unused_mut)]
     let mut c = tokio::process::Command::new(exe);
     #[cfg(windows)]
-    c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    c.creation_flags(crate::NO_WINDOW);
     c.kill_on_drop(true);
     c
 }
@@ -37,7 +37,6 @@ pub async fn ensure(_data_dir: &Path, _progress: impl Fn(u32)) -> Result<Tools> 
 
 #[cfg(windows)]
 pub async fn ensure(data_dir: &Path, progress: impl Fn(u32)) -> Result<Tools> {
-    use anyhow::Context;
     use std::fs;
     let _guard = INSTALL.lock().await;
     let root = data_dir.join("ffmpeg");
@@ -49,24 +48,11 @@ pub async fn ensure(data_dir: &Path, progress: impl Fn(u32)) -> Result<Tools> {
         return Ok(tools);
     }
     crate::clog!("downloading ffmpeg {VERSION}");
-    let zip = data_dir.join("ffmpeg-download.zip");
-    crate::obs::download::download(URL, SHA256, &zip, &progress).await?;
-    let tmp = data_dir.join("ffmpeg.new");
-    let _ = fs::remove_dir_all(&tmp);
-    let (z, t) = (zip.clone(), tmp.clone());
-    tokio::task::spawn_blocking(move || crate::obs::download::unzip(&z, &t)).await??;
-    let _ = fs::remove_file(&zip);
     // The zip wraps everything in "ffmpeg-<ver>-essentials_build/".
-    let inner = fs::read_dir(&tmp)?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.join("bin").join("ffmpeg.exe").exists())
-        .context("ffmpeg.exe not found in the download")?;
-    if root.exists() {
-        fs::remove_dir_all(&root)?;
-    }
-    fs::rename(&inner, &root)?;
-    let _ = fs::remove_dir_all(&tmp);
+    let find = |tmp: &Path| -> Option<PathBuf> {
+        fs::read_dir(tmp).ok()?.flatten().map(|e| e.path()).find(|p| p.join("bin").join("ffmpeg.exe").exists())
+    };
+    crate::obs::download::install_zip(URL, SHA256, &root, None, find, &progress).await?;
     fs::write(&marker, VERSION)?;
     crate::clog!("ffmpeg {VERSION} installed");
     Ok(tools)

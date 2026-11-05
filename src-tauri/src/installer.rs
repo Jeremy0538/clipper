@@ -66,7 +66,7 @@ mod win {
     };
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
-    const NO_WINDOW: u32 = 0x0800_0000;
+    use crate::NO_WINDOW;
     const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Clipper";
 
     pub fn installed_exe() -> Option<PathBuf> {

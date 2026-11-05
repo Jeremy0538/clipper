@@ -181,7 +181,10 @@ impl Held {
 /// The active listener calls this on a new press (not auto-repeat) with the
 /// modifiers held at that moment (bit 0 shift, 1 ctrl, 2 alt).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
+/// Logs nothing itself: the hook callback must stay tiny (a log write during
+/// heavy disk load could make Windows skip or remove the hook). The receiving
+/// thread logs the press.
+fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<(Slot, &'static str)> {
     // Exactly these modifiers: F8 must not fire on Ctrl+F8, and with F8 and
     // Shift+F8 on two slots only one of them fires.
     let slot = [Slot::Clip, Slot::Record, Slot::Screenshot].into_iter().find(|s| {
@@ -190,8 +193,7 @@ fn key_down(vk: u32, mods: u32, via: &'static str) -> Option<Slot> {
     if slot == Slot::Clip && !ARMED.load(Ordering::SeqCst) {
         return None;
     }
-    crate::clog!("{slot:?} key pressed ({via})");
-    Some(slot)
+    Some((slot, via))
 }
 
 /// Two listeners that never block the key (it always reaches the game):
@@ -227,8 +229,8 @@ pub fn start(app: tauri::AppHandle) {
         },
     };
 
-    static TX: OnceLock<mpsc::Sender<Slot>> = OnceLock::new();
-    fn send(slot: Option<Slot>) {
+    static TX: OnceLock<mpsc::Sender<(Slot, &'static str)>> = OnceLock::new();
+    fn send(slot: Option<(Slot, &'static str)>) {
         if let (Some(slot), Some(tx)) = (slot, TX.get()) {
             let _ = tx.send(slot);
         }
@@ -338,7 +340,7 @@ pub fn start(app: tauri::AppHandle) {
         DefWindowProcW(hwnd, msg, wp, lp)
     }
 
-    let (tx, rx) = mpsc::channel::<Slot>();
+    let (tx, rx) = mpsc::channel::<(Slot, &'static str)>();
     let _ = TX.set(tx);
 
     // The hook needs a thread with a message loop; keep the callback tiny and
@@ -383,7 +385,8 @@ pub fn start(app: tauri::AppHandle) {
         }
     });
     std::thread::spawn(move || {
-        for slot in rx {
+        for (slot, via) in rx {
+            crate::clog!("{slot:?} key pressed ({via})");
             let app = app.clone();
             match slot {
                 Slot::Clip => {
@@ -433,7 +436,7 @@ mod tests {
     fn key_matching() {
         apply(Slot::Screenshot, &Hotkey { code: "F7".into(), shift: false, ctrl: false, alt: false }).unwrap();
         assert_eq!(key_down(0x76, 1, "test"), None, "Shift+F7 is not F7");
-        assert_eq!(key_down(0x76, 0, "test"), Some(Slot::Screenshot));
+        assert_eq!(key_down(0x76, 0, "test"), Some((Slot::Screenshot, "test")));
     }
 
     #[test]

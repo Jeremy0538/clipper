@@ -216,11 +216,15 @@ $("su-level-mic").onclick = async () => {
 function testMsg(t) { $("su-test-msg").classList.remove("hidden"); $("su-test-msg").textContent = t; }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The path of the next saved clip, or null after `ms`.
+// The path of the next saved video clip, or null after `ms`. Screenshots and
+// clips recovered from an earlier run also send clip-saved: skip those.
 function nextClip(ms) {
   return new Promise(async (resolve) => {
     let done = false;
-    const un = await listen("clip-saved", (e) => { if (!done) { done = true; un(); resolve(e.payload); } });
+    const isTestClip = (p) => /\.(mp4|mkv|mov)$/i.test(p) && !/[\\/]Recovered[\\/]/.test(p);
+    const un = await listen("clip-saved", (e) => {
+      if (!done && isTestClip(String(e.payload))) { done = true; un(); resolve(e.payload); }
+    });
     setTimeout(() => { if (!done) { done = true; un(); resolve(null); } }, ms);
   });
 }
@@ -260,7 +264,9 @@ $("su-test").onclick = async () => {
     uiLog(`setup test clip failed: ${err}`);
     testMsg("The test clip failed: " + err);
   } finally {
-    if (startedHere) await invoke("stop_buffer").catch(() => {});
+    // With a game running, clipping stays on: stopping it by hand would also
+    // switch off auto-clipping for that game for the rest of the session.
+    if (startedHere && !status.game) await invoke("stop_buffer").catch(() => {});
     btn.disabled = false;
   }
 };

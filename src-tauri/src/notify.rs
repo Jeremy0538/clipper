@@ -43,17 +43,24 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Fire-and-forget toast (+ chime on success).
 pub fn toast(app: &AppHandle, ok: bool, title: impl Into<String>, detail: impl Into<String>) {
     let (app, title, detail) = (app.clone(), title.into(), detail.into());
-    tauri::async_runtime::spawn(async move { show(&app, ok, &title, &detail, ok).await });
+    tauri::async_runtime::spawn(async move { show(&app, ok, &title, &detail, ok, false).await });
 }
 
 /// Toast without the chime (status info like "game detected").
 pub fn info(app: &AppHandle, title: impl Into<String>, detail: impl Into<String>) {
     let (app, title, detail) = (app.clone(), title.into(), detail.into());
-    tauri::async_runtime::spawn(async move { show(&app, true, &title, &detail, false).await });
+    tauri::async_runtime::spawn(async move { show(&app, true, &title, &detail, false, false).await });
+}
+
+/// Info toast shown even with "Pop-up notifications" off: for rare, one-off
+/// news the user would otherwise miss (an update found at start).
+pub fn notice(app: &AppHandle, title: impl Into<String>, detail: impl Into<String>) {
+    let (app, title, detail) = (app.clone(), title.into(), detail.into());
+    tauri::async_runtime::spawn(async move { show(&app, true, &title, &detail, false, true).await });
 }
 
 /// `ok` = success styling; `title` big line, `detail` small line.
-async fn show(app: &AppHandle, ok: bool, title: &str, detail: &str, with_sound: bool) {
+async fn show(app: &AppHandle, ok: bool, title: &str, detail: &str, with_sound: bool, always: bool) {
     let (toast_on, sound_on, theme) = {
         let st = app.state::<crate::AppState>();
         let u = st.user.lock().await;
@@ -62,7 +69,7 @@ async fn show(app: &AppHandle, ok: bool, title: &str, detail: &str, with_sound: 
     if sound_on && with_sound {
         chime();
     }
-    if !toast_on {
+    if !toast_on && !always {
         return;
     }
     // saved = green edge (with chime), info = accent, error = red; same theme as the app.

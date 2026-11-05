@@ -63,7 +63,7 @@ fn mic_filters(a: &AudioSettings) -> Vec<(&'static str, &'static str, Value)> {
 /// Track numbers: every source goes into the Mix plus its own track.
 /// (Discord/apps are NOT assumed to be part of "everything I hear": they often
 /// play on another device, e.g. a headset, and would vanish from the Mix.)
-fn tracks(own: u8, _a: &AudioSettings) -> &'static [u8] {
+fn tracks(own: u8) -> &'static [u8] {
     match own {
         3 => &[1, 3],
         5 => &[1, 5],
@@ -145,7 +145,7 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             name: DISCORD,
             kind: "wasapi_process_output_capture",
             settings: json!({ "window": "Discord:Chrome_WidgetWin_1:Discord.exe", "priority": 2 }),
-            tracks: tracks(3, a),
+            tracks: tracks(3),
             fit: false,
             volume: a.discord_volume,
             filters: vec![],
@@ -167,7 +167,7 @@ pub fn specs(_dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             name: APP_INPUTS[i],
             kind: "wasapi_process_output_capture",
             settings: json!({ "window": app.window, "priority": 2 }),
-            tracks: tracks(5 + i as u8, a),
+            tracks: tracks(5 + i as u8),
             fit: false,
             volume: app_volume(a, i),
             filters: vec![],
@@ -219,7 +219,7 @@ pub fn specs(dev_dir: &Path, a: &AudioSettings) -> Vec<InputSpec> {
             name: DISCORD,
             kind: "ffmpeg_source",
             settings: media(file("dev-discord.m4a")),
-            tracks: tracks(3, a),
+            tracks: tracks(3),
             fit: false,
             volume: a.discord_volume,
             filters: vec![],
@@ -388,16 +388,13 @@ pub struct Device {
 
 /// Audio devices as OBS sees them (ids are what OBS stores as `device_id`).
 /// Uses a short-lived probe input that is never shown or mixed.
-pub async fn list_devices(obs: &ObsClient, output: bool) -> Result<Vec<Device>> {
+/// The choices OBS offers for `property` of an input `kind`: a hidden, muted
+/// probe input is created, asked and always removed again.
+pub async fn probe_items(obs: &ObsClient, kind: &str, property: &str) -> Result<Vec<serde_json::Value>> {
     // OBS removes inputs asynchronously: a unique name avoids clashing with
     // a probe from a moment ago.
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let (name, kind) = if output {
-        (format!("_probe_output_{stamp}"), output_device_kind())
-    } else {
-        (format!("_probe_input_{stamp}"), input_device_kind())
-    };
-    let name = name.as_str();
+    let name = format!("_probe_{property}_{stamp}");
     obs.call("CreateInput", json!({
         "sceneName": SCENE, "inputName": name, "inputKind": kind,
         "inputSettings": {}, "sceneItemEnabled": false,
@@ -405,13 +402,17 @@ pub async fn list_devices(obs: &ObsClient, output: bool) -> Result<Vec<Device>> 
     .await?;
     let _ = obs.call("SetInputMute", json!({ "inputName": name, "inputMuted": true })).await;
     let items = obs
-        .call("GetInputPropertiesListPropertyItems", json!({ "inputName": name, "propertyName": "device_id" }))
+        .call("GetInputPropertiesListPropertyItems", json!({ "inputName": name, "propertyName": property }))
         .await;
     let _ = obs.call("RemoveInput", json!({ "inputName": name })).await;
-    Ok(items?["propertyItems"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    Ok(items?["propertyItems"].as_array().cloned().unwrap_or_default())
+}
+
+pub async fn list_devices(obs: &ObsClient, output: bool) -> Result<Vec<Device>> {
+    let kind = if output { output_device_kind() } else { input_device_kind() };
+    Ok(probe_items(obs, kind, "device_id")
+        .await?
+        .iter()
         .filter(|i| i["itemEnabled"].as_bool().unwrap_or(true))
         .filter_map(|i| Some(Device {
             id: i["itemValue"].as_str()?.to_string(),

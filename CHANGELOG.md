@@ -4,8 +4,18 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.4.11
+- When an update is available, Clipper tells you once at start, also with pop-up notifications turned off.
+- Saving in the editor can no longer hang on a clip with damaged frames, and a failing fast NVIDIA save no longer makes later saves slower. Clips recorded in 10-bit or 4:4:4 come out playable in Discord again.
+- Clipper no longer hangs on "starting" or "downloading" when OBS or the internet doesn't answer: it tries again.
+- Fixed: after OBS failed to start, quitting or changing quality could close another program. A leftover OBS no longer blocks installing OBS (and no longer wipes its settings).
+- Fixed: stopping clipping or switching between a game's launcher and the game no longer turns auto-clipping off or repeats "Game detected". Changing the clip length while a game starts no longer keeps clipping off.
+- Fixed: starring two clips quickly could lose one star, and a star that failed to save still showed as starred.
+- The clip list is faster with many clips (no reload of every preview after a star or rename), and opening Settings while clipping no longer makes OBS re-check your screens each time.
+- Stopping a screen recording no longer holds up other events for a few seconds, and Clipper doesn't get stuck in screen mode when switching back fails.
+
 ## 0.4.10
-- Saving in the editor is about twice as fast on NVIDIA cards (trimming, cutting and combining clips), at the same size and quality.
+- Saving in the editor is faster on NVIDIA cards (trimming, cutting and combining clips).
 
 ## 0.4.9
 - Editor: a **Delete the original** option next to Save. The original goes to the recycle bin and its star moves to the new clip. Clipper remembers your choice.

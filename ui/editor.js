@@ -70,17 +70,18 @@ async function openEditor(c) {
     edv.src = convertFileSrc(info.path);
     edv.playbackRate = ed.rate;
     ed.ctx = ed.ctx || new AudioContext();
-    ed.tracks = [];
+    dropTracks();
     const tracks = [];
     for (const s of info.sources) {
       const bytes = await invoke("editor_track", { path: info.path, index: s.index });
       if (stale()) return;
       const buf = await ed.ctx.decodeAudioData(bytes);
       if (stale()) return;
-      const gain = ed.ctx.createGain();
-      gain.connect(ed.ctx.destination);
-      tracks.push({ s, buf, gain, node: null });
+      tracks.push({ s, buf, gain: ed.ctx.createGain(), node: null });
     }
+    // Connected only now: a stale open (newer clip took over) leaves nothing
+    // attached to the speakers.
+    for (const t of tracks) t.gain.connect(ed.ctx.destination);
     ed.tracks = tracks;
     renderTracks();
     renderTimeline();
@@ -315,11 +316,17 @@ window.addEventListener("keydown", (e) => {
   else if (e.code === "ArrowRight") seekTo(Math.min(ed.info.duration, edNow() + step));
 });
 
+// Unhook the previous clip's gain nodes, or they pile up on the speakers.
+function dropTracks() {
+  for (const t of ed.tracks || []) { try { t.gain.disconnect(); } catch {} }
+  ed.tracks = [];
+}
+
 async function closeEditor() {
   ed.opening++;   // a clip that is still loading stops
   edv.pause(); stopAudio();
   edv.removeAttribute("src"); edv.load();
-  ed.info = null; ed.tracks = [];
+  ed.info = null; dropTracks();
   invoke("editor_close").catch(() => {});
   showView("clips");
 }

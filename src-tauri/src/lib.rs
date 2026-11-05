@@ -17,6 +17,10 @@ mod obs;
 mod settings;
 mod updater;
 
+/// CREATE_NO_WINDOW: child processes never flash a console window.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const NO_WINDOW: u32 = 0x0800_0000;
+
 use obs::{config::Settings, ws::DISCONNECTED, ObsManager};
 use serde::Serialize;
 use serde_json::json;
@@ -76,6 +80,10 @@ pub struct AppState {
     /// A setting that needs an OBS restart changed while clipping/recording:
     /// restart as soon as both have stopped.
     pub restart_pending: AtomicBool,
+    /// set_buffer is stopping/starting the buffer: the game detector waits.
+    pub buffer_changing: AtomicBool,
+    /// Bumped by every editor_open: only the newest one sets `editor`.
+    editor_seq: AtomicU64,
 }
 
 impl AppState {
@@ -109,8 +117,11 @@ impl AppState {
 
 pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
     let st = app.state::<AppState>();
-    let mut s = st.status.lock().await;
-    f(&mut s);
+    let s = {
+        let mut s = st.status.lock().await;
+        f(&mut s);
+        s.clone()
+    };
     let _ = app.emit("status", s.clone());
     update_tray(app, &s);
 }
@@ -119,6 +130,10 @@ pub(crate) async fn set_status(app: &AppHandle, f: impl FnOnce(&mut Status)) {
 fn update_tray(app: &AppHandle, s: &Status) {
     static ICON_IDLE: &[u8] = include_bytes!("../icons/32x32.png");
     static ICON_REC: &[u8] = include_bytes!("../icons/tray-recording.png");
+    type Icon = Option<tauri::image::Image<'static>>;
+    static ICONS: std::sync::OnceLock<(Icon, Icon)> = std::sync::OnceLock::new();
+    // Last tooltip and icon (true = recording): only touch the tray on a change.
+    static LAST: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
     let Some(tray) = app.tray_by_id("tray") else { return };
     let tip = match (&s.game, s.buffer, s.recording) {
         (_, _, true) => "Clipper: recording".to_string(),
@@ -127,10 +142,21 @@ fn update_tray(app: &AppHandle, s: &Status) {
         _ if s.obs != "ready" => format!("Clipper: OBS {}", s.obs),
         _ => "Clipper: waiting for a game".to_string(),
     };
-    let _ = tray.set_tooltip(Some(&tip));
-    if let Ok(img) = tauri::image::Image::from_bytes(if s.buffer || s.recording { ICON_REC } else { ICON_IDLE }) {
-        let _ = tray.set_icon(Some(img));
+    let rec = s.buffer || s.recording;
+    let mut last = LAST.lock().unwrap();
+    if last.as_ref().is_some_and(|(t, r)| *t == tip && *r == rec) {
+        return;
     }
+    let _ = tray.set_tooltip(Some(&tip));
+    if last.as_ref().map(|(_, r)| *r) != Some(rec) {
+        let (idle, recording) = ICONS.get_or_init(|| {
+            (tauri::image::Image::from_bytes(ICON_IDLE).ok(), tauri::image::Image::from_bytes(ICON_REC).ok())
+        });
+        if let Some(img) = if rec { recording } else { idle } {
+            let _ = tray.set_icon(Some(img.clone()));
+        }
+    }
+    *last = Some((tip, rec));
 }
 
 /// Scale the whole page with the window: the layout is made for 1100×720, so a
@@ -273,8 +299,7 @@ fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) ->
 #[tauri::command(async)]
 fn set_favorite(state: tauri::State<'_, AppState>, path: String, on: bool) -> Result<(), String> {
     let p = clips::checked_in(&state.clip_dirs(), &path)?;
-    clips::Favorites::new(&state.obs.data_dir).set(&p.to_string_lossy(), on);
-    Ok(())
+    clips::Favorites::new(&state.obs.data_dir).set(&p.to_string_lossy(), on)
 }
 
 #[tauri::command]
@@ -307,7 +332,19 @@ async fn toggle_recording(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn list_monitors(state: tauri::State<'_, AppState>) -> Result<Vec<screen::Monitor>, String> {
-    screen::list_monitors(&state.obs.client).await.map_err(|e| format!("{e:#}"))
+    // Once per OBS start: each probe creates and removes a monitor capture in
+    // the live OBS, which can cause hitches while a game is being clipped.
+    static CACHE: Mutex<Option<(u64, Vec<screen::Monitor>)>> = Mutex::const_new(None);
+    let session = state.obs_session.load(Ordering::SeqCst);
+    let mut cache = CACHE.lock().await;
+    if let Some((s, m)) = cache.as_ref() {
+        if *s == session && !m.is_empty() {
+            return Ok(m.clone());
+        }
+    }
+    let m = screen::list_monitors(&state.obs.client).await.map_err(|e| format!("{e:#}"))?;
+    *cache = Some((session, m.clone()));
+    Ok(m)
 }
 
 #[tauri::command]
@@ -485,8 +522,9 @@ async fn set_buffer(state: tauri::State<'_, AppState>, secs: u32) -> Result<u32,
     let was_running = obs.call("GetReplayBufferStatus", json!({})).await.map_err(err)?["outputActive"]
         .as_bool()
         .unwrap_or(false);
-    // Keep the game detector from restarting clipping while we change it.
-    let was_stopped = state.user_stopped.swap(true, Ordering::SeqCst);
+    // Keep the game detector from restarting clipping while we change it
+    // (a flag of its own: user_stopped may change meanwhile, e.g. a new game).
+    state.buffer_changing.store(true, Ordering::SeqCst);
     let r = async {
     if was_running {
         obs.call("StopReplayBuffer", json!({})).await.map_err(err)?;
@@ -509,7 +547,7 @@ async fn set_buffer(state: tauri::State<'_, AppState>, secs: u32) -> Result<u32,
     Ok::<(), String>(())
     }
     .await;
-    state.user_stopped.store(was_stopped, Ordering::SeqCst);
+    state.buffer_changing.store(false, Ordering::SeqCst);
     r?;
     Ok(secs)
 }
@@ -553,8 +591,11 @@ async fn set_audio(state: tauri::State<'_, AppState>, audio: AudioSettings) -> R
             state.obs.restart();
             return Ok(());
         }
-        // The new track list applies once clipping and recording have stopped.
-        state.restart_pending.store(true, Ordering::SeqCst);
+        // The new track list applies once clipping and recording have stopped
+        // (without OBS running, its next start reads the new settings anyway).
+        if state.obs.client.is_connected().await {
+            state.restart_pending.store(true, Ordering::SeqCst);
+        }
     }
     if state.obs.client.is_connected().await {
         state.obs.apply_audio().await.map_err(|e| format!("{e:#}"))?;
@@ -862,15 +903,20 @@ fn clean_share_dir(data_dir: &std::path::Path) {
     }
 }
 
+/// Async (off the main thread): checked_in canonicalizes every clips folder,
+/// which can block for seconds on a slow or unplugged drive.
 #[tauri::command]
-fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
-    clips::reveal(&clips::checked_in(&state.clip_dirs(), &path)?)
+async fn reveal_clip(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let dirs = state.clip_dirs();
+    tauri::async_runtime::spawn_blocking(move || clips::reveal(&clips::checked_in(&dirs, &path)?))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Where OBS writes a clip before Clipper moves it into the clips folder: on
 /// the same drive, so the move is instant and big recordings don't fill C:
 /// (also for the default Videos\Clipper, which may be on another drive).
-fn incoming_dir(_data_dir: &std::path::Path, clips_dir: &std::path::Path, _default: &std::path::Path) -> PathBuf {
+fn incoming_dir(clips_dir: &std::path::Path) -> PathBuf {
     clips_dir.join(clips::INCOMING)
 }
 
@@ -1001,7 +1047,7 @@ async fn change_clips_dir(app: &AppHandle, path: &str, move_clips: bool) -> Resu
         *st.other_clip_dirs.write().unwrap() = u.old_clips_dirs.iter().map(PathBuf::from).collect();
         u.save(&st.settings_file).map_err(|e| e.to_string())?;
     }
-    let incoming = incoming_dir(&st.obs.data_dir, &new, &st.default_clips_dir);
+    let incoming = incoming_dir(&new);
     st.obs.set_incoming(incoming.clone());
     if st.obs.client.is_connected().await {
         if let Err(e) = st.obs.client.call("SetRecordDirectory", json!({ "recordDirectory": incoming.to_string_lossy() })).await {
@@ -1030,7 +1076,7 @@ async fn move_clips_now(app: &AppHandle, from: &std::path::Path, to: &std::path:
 }
 
 #[tauri::command]
-fn open_clips_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn open_clips_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
     std::process::Command::new(opener).arg(&state.clips_dir()).spawn().map_err(|e| e.to_string())?;
     Ok(())
@@ -1047,6 +1093,7 @@ async fn tools_for(app: &AppHandle) -> Result<tools::Tools, String> {
 #[tauri::command]
 async fn editor_open(app: AppHandle, path: String) -> Result<editor::ClipInfo, String> {
     let st = app.state::<AppState>();
+    let seq = st.editor_seq.fetch_add(1, Ordering::SeqCst) + 1;
     let p = clips::checked_in(&st.clip_dirs(), &path)?;
     let tools = tools_for(&app).await?;
     // A fresh folder per opened clip: scrub images still being made for a
@@ -1056,8 +1103,13 @@ async fn editor_open(app: AppHandle, path: String) -> Result<editor::ClipInfo, S
     let info = editor::open(&tools, &st.obs.data_dir.join("editor-cache").join(stamp.to_string()), &p)
         .await
         .map_err(|e| format!("Could not open the clip: {e:#}"))?;
+    // A slower open of an earlier clip must not replace a newer one.
+    let mut ed = st.editor.lock().await;
+    if st.editor_seq.load(Ordering::SeqCst) != seq {
+        return Err("Another clip was opened meanwhile".into());
+    }
     clog!("editor: opened {} ({:.1} s, {} sources)", info.name, info.duration, info.sources.len());
-    *st.editor.lock().await = Some(info.clone());
+    *ed = Some(info.clone());
     Ok(info)
 }
 
@@ -1194,7 +1246,8 @@ async fn watch_events(app: AppHandle) {
                 }
                 set_status(&app, |s| s.buffer = active).await;
                 if state == "OBS_WEBSOCKET_OUTPUT_STOPPED" {
-                    restart_if_pending(&app).await;
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move { restart_if_pending(&app).await });
                 }
             }
             "ReplayBufferSaved" => {
@@ -1252,10 +1305,15 @@ async fn watch_events(app: AppHandle) {
                             }
                         });
                     }
-                    if !st.status.lock().await.buffer {
-                        let _ = modes::leave_screen(&app).await;
-                    }
-                    restart_if_pending(&app).await;
+                    // Leaving screen mode waits for OBS to go idle (seconds):
+                    // never on the event loop.
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if !app.state::<AppState>().status.lock().await.buffer {
+                            let _ = modes::leave_screen(&app).await;
+                        }
+                        restart_if_pending(&app).await;
+                    });
                 }
             }
             "InputVolumeMeters" => {
@@ -1293,7 +1351,6 @@ async fn watch_events(app: AppHandle) {
     }
 }
 
-/// Moving a clip in can be a multi-GB copy (other drive): not on the event loop.
 /// Apply a setting that needed an OBS restart, now that nothing records.
 async fn restart_if_pending(app: &AppHandle) {
     let st = app.state::<AppState>();
@@ -1304,6 +1361,7 @@ async fn restart_if_pending(app: &AppHandle) {
     }
 }
 
+/// Moving a clip in can be a multi-GB copy (other drive): not on the event loop.
 async fn adopt_blocking(src: &str, clips_dir: PathBuf, game: Option<String>) -> anyhow::Result<PathBuf> {
     let src = PathBuf::from(src);
     tauri::async_runtime::spawn_blocking(move || clips::adopt(&src, &clips_dir, game.as_deref())).await?
@@ -1354,6 +1412,8 @@ pub fn run() {
                 None => app.path().app_data_dir()?,
             };
             std::fs::create_dir_all(&data_dir)?;
+            // First, so whatever goes wrong below (an unreadable settings.json) is logged.
+            log::init(data_dir.join("clipper.log"));
             let settings_file = data_dir.join("settings.json");
             let user = UserSettings::load(&settings_file);
             let default_clips_dir = match dir_from_env("CLIPPER_CLIPS_DIR") {
@@ -1376,7 +1436,6 @@ pub fn run() {
             let scope = app.asset_protocol_scope();
             scope.allow_directory(&clips_dir, true)?;
             scope.allow_directory(&data_dir, true)?;
-            log::init(data_dir.join("clipper.log"));
             // Videos\Clipper is always ours. A chosen folder is marked when it
             // is chosen; one chosen in 0.4.2/0.4.3 (before markers) only when it
             // holds nothing but clips. A folder with other files is never sorted,
@@ -1436,7 +1495,7 @@ pub fn run() {
                 settings.height = m.size().height & !1;
             }
             let obs = ObsManager::new(data_dir, settings)?;
-            obs.set_incoming(incoming_dir(&obs.data_dir, &clips_dir, &default_clips_dir));
+            obs.set_incoming(incoming_dir(&clips_dir));
             app.manage(AppState {
                 obs: obs.clone(),
                 clips_dir: std::sync::RwLock::new(clips_dir),
@@ -1454,6 +1513,8 @@ pub fn run() {
                 last_game: std::sync::Mutex::new(None),
                 rec_folder: std::sync::Mutex::new(None),
                 restart_pending: AtomicBool::new(false),
+                buffer_changing: AtomicBool::new(false),
+                editor_seq: AtomicU64::new(0),
             });
 
             // Tray
@@ -1498,9 +1559,17 @@ pub fn run() {
                 .build(app)?;
 
             // OBS supervisor + event follower
+            // One task applies OBS states in the order they were reported
+            // (a task per report could land an older state last).
+            let (obs_tx, mut obs_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let h = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(state) = obs_rx.recv().await {
+                    set_status(&h, |s| s.obs = state).await;
+                }
+            });
             let h = handle.clone();
             tauri::async_runtime::spawn(obs.run(move |state| {
-                let h = h.clone();
                 // Download progress would spam the log every percent.
                 if !state.starts_with("downloading") || state.ends_with(" 0%") || state.ends_with("100%") {
                     clog!("OBS: {state}");
@@ -1509,12 +1578,13 @@ pub fn run() {
                     notify::toast(&h, false, "OBS problem", state.clone());
                 }
                 if state == "ready" {
-                    h.state::<AppState>().obs_session.fetch_add(1, Ordering::SeqCst);
-                    h.state::<AppState>().screen.store(false, Ordering::SeqCst);
+                    let st = h.state::<AppState>();
+                    st.obs_session.fetch_add(1, Ordering::SeqCst);
+                    st.screen.store(false, Ordering::SeqCst);
+                    // This OBS start already read the current settings.
+                    st.restart_pending.store(false, Ordering::SeqCst);
                 }
-                tauri::async_runtime::spawn(async move {
-                    set_status(&h, |s| s.obs = state).await;
-                });
+                let _ = obs_tx.send(state);
             }));
             tauri::async_runtime::spawn(watch_events(handle.clone()));
             tauri::async_runtime::spawn(recover_leftovers(handle.clone(), std::time::SystemTime::now()));
@@ -1538,7 +1608,8 @@ pub fn run() {
                 match updater::check(test).await {
                     Ok(Some(u)) => {
                         clog!("update available: {}", u.version);
-                        notify::info(&h, "Update available", format!("Clipper {} (Settings → Updates)", u.version));
+                        // Once per start, also with pop-ups off: easy to miss otherwise.
+                        notify::notice(&h, "Update available", format!("Clipper {}: Settings → Updates", u.version));
                         let _ = h.emit("update-available", u);
                     }
                     Ok(None) => clog!("no update"),

@@ -25,6 +25,7 @@ pub fn current() -> semver::Version {
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("Clipper/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
         .build()?)
 }
 

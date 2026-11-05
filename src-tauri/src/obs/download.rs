@@ -26,39 +26,75 @@ pub fn installed(root: &Path) -> bool {
 /// Download, verify and unpack OBS into `root`, keeping an existing `config/`.
 /// `progress` gets whole percentages while downloading.
 pub async fn install(root: &Path, progress: impl Fn(u32)) -> Result<()> {
-    let parent = root.parent().context("OBS folder has no parent")?;
-    fs::create_dir_all(parent)?;
-    let zip_path = parent.join("obs-download.zip");
-    download(URL, SHA256, &zip_path, &progress).await?;
+    let r = install_zip(URL, SHA256, root, Some("config"), find_obs_root, &progress).await?;
+    fs::write(r.join(MARKER), OBS_VERSION)?;
+    Ok(())
+}
 
-    let tmp = parent.join("obs.new");
+/// The shared installer for OBS and ffmpeg: download `url` (checked against
+/// `sha256`) next to `root`, unpack it into `<root>.new`, find the program's
+/// folder in it with `find`, and replace `root` with it, keeping `keep` (a
+/// sub-folder of the old install, e.g. OBS's config). Returns `root`.
+pub(crate) async fn install_zip(
+    url: &str,
+    sha256: &str,
+    root: &Path,
+    keep: Option<&str>,
+    find: fn(&Path) -> Option<PathBuf>,
+    progress: &impl Fn(u32),
+) -> Result<PathBuf> {
+    let parent = root.parent().context("install folder has no parent")?;
+    let name = root.file_name().context("install folder has no name")?.to_string_lossy().into_owned();
+    fs::create_dir_all(parent)?;
+    let zip_path = parent.join(format!("{name}-download.zip"));
+    download(url, sha256, &zip_path, progress).await?;
+
+    let tmp = parent.join(format!("{name}.new"));
     let _ = fs::remove_dir_all(&tmp);
-    let z = zip_path.clone();
-    let t = tmp.clone();
+    let (z, t) = (zip_path.clone(), tmp.clone());
     tokio::task::spawn_blocking(move || unzip(&z, &t)).await??;
     let _ = fs::remove_file(&zip_path);
 
     // The zip may or may not wrap everything in one top-level folder.
-    let unpacked = find_obs_root(&tmp).context("obs64.exe not found in the download")?;
+    let unpacked = find(&tmp).context("the program was not found in the download")?;
 
-    // Keep the user's OBS config (our profile, scene, websocket password).
-    let old_config = root.join("config");
-    if old_config.is_dir() {
-        let _ = fs::remove_dir_all(unpacked.join("config"));
-        fs::rename(&old_config, unpacked.join("config"))?;
+    // Clear the old install first, all but `keep`: if a file is still in use
+    // this fails here, while the kept folder (OBS: profile, scene, websocket
+    // password) is still in place for the next attempt.
+    if root.exists() {
+        for e in fs::read_dir(root)?.flatten() {
+            if keep.is_some_and(|k| e.file_name() == k) {
+                continue;
+            }
+            let p = e.path();
+            if p.is_dir() { fs::remove_dir_all(&p)? } else { fs::remove_file(&p)? }
+        }
+    }
+    if let Some(k) = keep {
+        let old = root.join(k);
+        if old.is_dir() {
+            let _ = fs::remove_dir_all(unpacked.join(k));
+            fs::rename(&old, unpacked.join(k))?;
+        }
     }
     if root.exists() {
         fs::remove_dir_all(root)?;
     }
     fs::rename(&unpacked, root)?;
     let _ = fs::remove_dir_all(&tmp);
-    fs::write(root.join(MARKER), OBS_VERSION)?;
-    Ok(())
+    Ok(root.to_path_buf())
 }
 
 /// Stream `url` to `dest`, verifying the SHA-256 (hex) on the way.
 pub(crate) async fn download(url: &str, sha256: &str, dest: &Path, progress: &impl Fn(u32)) -> Result<()> {
-    let resp = reqwest::get(url).await?.error_for_status()?;
+    // Timeouts so a stalled connection fails (and is retried) instead of hanging
+    // forever; read_timeout is per read, so big downloads on slow lines still work.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("Clipper/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let resp = client.get(url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
     let part = dest.with_extension("part");
     let mut file = fs::File::create(&part)?;

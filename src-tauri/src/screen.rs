@@ -1,7 +1,7 @@
 //! Screen mode: a second OBS scene that shows one monitor or all of them.
 //! Used for plain screen recordings and for a clip buffer without a game.
 
-use crate::obs::{config::SCENE, setup, ws::ObsClient};
+use crate::obs::{setup, ws::ObsClient};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
@@ -45,21 +45,9 @@ pub async fn list_monitors(obs: &ObsClient) -> Result<Vec<Monitor>> {
             Monitor { id: "dev-b".into(), name: "Dev screen B: 2560x1440 @ 3440,0".into(), x: 3440, y: 0, w: 2560, h: 1440, primary: false },
         ]);
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-    let name = format!("_probe_monitor_{stamp}");
-    obs.call("CreateInput", json!({
-        "sceneName": SCENE, "inputName": name, "inputKind": "monitor_capture",
-        "inputSettings": {}, "sceneItemEnabled": false,
-    }))
-    .await?;
-    let items = obs
-        .call("GetInputPropertiesListPropertyItems", json!({ "inputName": name, "propertyName": "monitor_id" }))
-        .await;
-    let _ = obs.call("RemoveInput", json!({ "inputName": name })).await;
-    Ok(items?["propertyItems"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    Ok(crate::obs::setup::probe_items(obs, "monitor_capture", "monitor_id")
+        .await?
+        .iter()
         .filter_map(|i| {
             let id = i["itemValue"].as_str()?.to_string();
             let name = i["itemName"].as_str()?.to_string();

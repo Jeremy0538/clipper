@@ -35,22 +35,29 @@ pub async fn enter_screen(app: &AppHandle) -> Result<(), String> {
     }
     let audio = screen::audio_inputs(obs).await;
     let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
+    // prepare() changes the canvas first: on any failure put it and the game
+    // scene back, or game clips would come out at the screen's size.
+    let restore = || async {
+        let (gw, gh) = {
+            let s = st.obs.settings.lock().unwrap();
+            (s.width, s.height)
+        };
+        let _ = screen::set_canvas(obs, gw, gh).await;
+        if let Err(e) = st.obs.apply_audio().await {
+            clog!("refit game scene: {e:#}");
+        }
+    };
     let (w, h) = match screen::prepare(obs, &choice, &audio).await {
         Ok(v) => v,
         Err(e) => {
-            // prepare() changed the canvas first: put it and the game scene back.
-            let (gw, gh) = {
-                let s = st.obs.settings.lock().unwrap();
-                (s.width, s.height)
-            };
-            let _ = screen::set_canvas(obs, gw, gh).await;
-            if let Err(e) = st.obs.apply_audio().await {
-                clog!("refit game scene: {e:#}");
-            }
+            restore().await;
             return Err(format!("{e:#}"));
         }
     };
-    screen::use_scene(obs, screen::SCREEN_SCENE).await.map_err(|e| format!("{e:#}"))?;
+    if let Err(e) = screen::use_scene(obs, screen::SCREEN_SCENE).await {
+        restore().await;
+        return Err(format!("{e:#}"));
+    }
     st.screen.store(true, Ordering::SeqCst);
     clog!("screen mode ({choice}, {w}x{h})");
     set_status(app, |s| s.screen = true).await;
@@ -98,11 +105,13 @@ pub async fn start_clipping(app: &AppHandle) -> Result<(), String> {
 pub async fn stop_clipping(app: &AppHandle) -> Result<(), String> {
     let st = app.state::<AppState>();
     st.user_stopped.store(true, Ordering::SeqCst);
-    st.obs.client.call("StopReplayBuffer", json!({})).await.map_err(|e| e.to_string())?;
+    // Back to game mode even when the stop fails (the buffer had already
+    // stopped): otherwise OBS stays in screen mode with a screen-sized canvas.
+    let r = st.obs.client.call("StopReplayBuffer", json!({})).await.map_err(|e| e.to_string());
     if !st.status.lock().await.recording {
         let _ = leave_screen(app).await;
     }
-    Ok(())
+    r.map(|_| ())
 }
 
 /// Start or stop a normal recording: of the game when one runs, else the screen.
