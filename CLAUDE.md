@@ -149,7 +149,7 @@ stream tag `name`.
 
 ## Open items (2026-11-02)
 
-- **0.4.1 is the first stable release** (2026-11-02). New installs only get stable releases; keep
+- **0.4.1 was the first stable release** (2026-11-02); **0.5.0 is the current stable** (2026-11-06). New installs only get stable releases; keep
   shipping test builds and promote one once the owner has tested it.
 
 - 0.3.0 (setup guide, F8/F9/F10, OBS tray icon removal) needs a Windows test. It is unconfirmed
