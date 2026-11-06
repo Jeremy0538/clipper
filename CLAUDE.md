@@ -44,6 +44,9 @@ cd ..
 scripts/release.sh 0.3.1 "What changed, in plain English for the tester"   # build exe, bump, commit, push main+test, gh pre-release
 ```
 
+- **CI:** `.github/workflows/ci.yml` runs `cargo test` + a release build on a real Windows runner
+  (GitHub Actions) for every push to `main`/`test` and every PR; the exe is a 7-day workflow artifact.
+  Check it with `gh run list` / `gh run view --log-failed` after pushing.
 - `release.sh` bumps `Cargo.toml` and `tauri.conf.json`, builds
   `src-tauri/target/x86_64-pc-windows-msvc/release/clipper.exe`, commits "Release X.Y.Z", moves
   branch `test` to HEAD, pushes `main` and `test`, then runs
