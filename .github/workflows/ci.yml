@@ -24,7 +24,7 @@ jobs:
         run: cargo test --locked
       - name: Release build
         run: cargo build --release --locked
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: clipper-exe
           path: src-tauri/target/release/clipper.exe
