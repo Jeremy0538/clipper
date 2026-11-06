@@ -4,6 +4,9 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.5.0
+- New stable version: everything from the 0.4.x test builds, now for everyone.
+
 ## 0.4.11
 - When an update is available, Clipper tells you once at start, also with pop-up notifications turned off.
 - Saving in the editor can no longer hang on a clip with damaged frames, and a failing fast NVIDIA save no longer makes later saves slower. Clips recorded in 10-bit or 4:4:4 come out playable in Discord again.
