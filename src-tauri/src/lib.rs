@@ -16,6 +16,8 @@ mod changelog;
 mod obs;
 mod settings;
 mod updater;
+#[cfg(test)]
+mod testutil;
 
 /// CREATE_NO_WINDOW: child processes never flash a console window.
 #[cfg_attr(not(windows), allow(dead_code))]

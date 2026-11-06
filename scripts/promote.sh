@@ -5,7 +5,9 @@
 # release (the same text the app shows under "What's new").
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ver="${1:?usage: scripts/promote.sh X.Y.Z}"
+ver="${1:?usage: scripts/promote.sh X.Y.0}"
+# Version rule: only X.Y.0 releases are stable; X.Y.N (N>0) stay test builds.
+[[ $ver == *.0 ]] || { echo "only X.Y.0 can be stable; $ver is a test build" >&2; exit 1; }
 # The newest stable release *before* this one (so re-running promote for a
 # version that is already stable doesn't end up with empty notes).
 prev="$(gh release list --exclude-pre-releases --limit 100 --json tagName -q '.[].tagName' | python3 -c '

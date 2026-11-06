@@ -207,7 +207,10 @@ const NOT_APPS: &[&str] = &["clipper.exe", "obs64.exe", "explorer.exe", "textinp
     "searchhost.exe", "startmenuexperiencehost.exe", "lockapp.exe", "msedgewebview2.exe"];
 
 fn pretty_name(exe: &str) -> String {
-    let stem = exe.trim_end_matches(".exe").trim_end_matches(".EXE");
+    let stem = match exe.len().checked_sub(4) {
+        Some(i) if exe.is_char_boundary(i) && exe[i..].eq_ignore_ascii_case(".exe") => &exe[..i],
+        _ => exe,
+    };
     let mut c = stem.chars();
     match c.next() {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
@@ -253,24 +256,27 @@ pub fn running_apps() -> Vec<AppRef> {
 /// must keep running until the process exits.
 #[cfg(windows)]
 fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
-    candidates
+    best(candidates
         .into_iter()
         .map(|(name, pid, custom)| match win::main_window(pid) {
             Some(w) => (w.area, Game { name, pid, obs_window: w.obs_string(), custom }),
             None => (-1, Game { name, pid, obs_window: String::new(), custom }),
         })
-        // A real game always wins over an added app (Discord, Chrome…): those
-        // are only clipped while no game runs. Then the biggest window.
-        .max_by_key(|(area, g)| (!g.custom, *area))
-        .map(|(_, g)| g)
+        .collect())
 }
 
 #[cfg(not(windows))]
 fn pick(candidates: Vec<(String, u32, bool)>) -> Option<Game> {
-    candidates
+    best(candidates
         .into_iter()
-        .min_by_key(|c| c.2) // a real game before an added app
-        .map(|(name, pid, custom)| Game { name, pid, obs_window: String::new(), custom })
+        .map(|(name, pid, custom)| (0, Game { name, pid, obs_window: String::new(), custom }))
+        .collect())
+}
+
+/// A real game always wins over an added app (Discord, Chrome…): those are
+/// only clipped while no game runs. Then the biggest window (area, -1 = none).
+fn best(candidates: Vec<(i64, Game)>) -> Option<Game> {
+    candidates.into_iter().max_by_key(|(area, g)| (!g.custom, *area)).map(|(_, g)| g)
 }
 
 #[cfg(windows)]
@@ -467,15 +473,21 @@ mod name_tests {
         assert_eq!(norm(r"D:\SteamLibrary\steamapps\Common\Game"), "d:/steamlibrary/steamapps/common/game");
         assert_eq!(pretty_name("spotify.exe"), "Spotify");
         assert_eq!(pretty_name("Discord.EXE"), "Discord");
+        assert_eq!(pretty_name("Game.Exe"), "Game");
+        assert_eq!(pretty_name("exe"), "Exe");
         assert_eq!(pretty_name(""), "");
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn real_game_beats_added_app() {
-        let g = pick(vec![("Discord".into(), 1, true), ("Elden Ring".into(), 2, false)]).unwrap();
-        assert_eq!(g.name, "Elden Ring");
-        assert!(pick(vec![]).is_none());
+        let g = |name: &str, custom| Game { name: name.into(), pid: 1, obs_window: String::new(), custom };
+        // A big added app loses to a game without a visible window.
+        let won = best(vec![(4_000_000, g("Discord", true)), (-1, g("Elden Ring", false))]).unwrap();
+        assert_eq!(won.name, "Elden Ring");
+        // Between games, the biggest window wins.
+        let won = best(vec![(100, g("Launcher", false)), (2_000_000, g("Elden Ring", false))]).unwrap();
+        assert_eq!(won.name, "Elden Ring");
+        assert!(best(vec![]).is_none());
     }
 
     #[cfg(windows)]

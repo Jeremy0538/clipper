@@ -1,29 +1,40 @@
 name: CI
 
-# Runs on every push and pull request: unit tests + a release build on a real Windows runner.
-# The exe is kept as a workflow artifact (7 days) so a failing build is caught before release.sh.
+# Unit tests + the same release build release.sh makes (Tauri CLI, so the
+# custom-protocol feature is on), on a real Windows runner. The exe is kept as a
+# workflow artifact (7 days) so a failing build is caught before release.sh.
+# Only `main`: release.sh pushes `test` to the same commit, which would build twice.
 on:
   push:
-    branches: [main, test]
+    branches: [main]
+    paths: ['**', '!**.md', 'CHANGELOG.md'] # docs-only commits skip CI; CHANGELOG is in the exe
   pull_request:
+    paths: ['**', '!**.md', 'CHANGELOG.md']
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
       - name: Unit tests
+        working-directory: src-tauri
         run: cargo test --locked
       - name: Release build
-        run: cargo build --release --locked
+        run: npx tauri build --no-bundle -- --locked
       - uses: actions/upload-artifact@v6
         with:
           name: clipper-exe

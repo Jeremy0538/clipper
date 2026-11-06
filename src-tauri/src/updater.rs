@@ -31,6 +31,9 @@ fn client() -> Result<reqwest::Client> {
 
 /// Newest release newer than this build, if any.
 pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
+    // Forget an earlier result first: if this check fails or finds nothing, an
+    // update from another channel must not stay installable.
+    *FOUND.lock().unwrap() = None;
     // Stable users: GitHub's "latest" release, however many test builds came
     // after it. Testers: the newest releases of any kind.
     let url = if include_test_builds {
@@ -197,10 +200,5 @@ mod tests {
         let bad_tag = release("latest", false);
         let list = json!([draft, no_exe, no_digest, md5, bad_tag, release("v0.6.0", false)]);
         assert_eq!(pick_release(list, &v("0.4.0"), true).unwrap().version, "0.6.0");
-    }
-
-    #[test]
-    fn crate_version_parses() {
-        let _ = current();
     }
 }

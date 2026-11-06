@@ -44,21 +44,26 @@ cd ..
 scripts/release.sh 0.3.1 "What changed, in plain English for the tester"   # build exe, bump, commit, push main+test, gh pre-release
 ```
 
-- **CI:** `.github/workflows/ci.yml` runs `cargo test` + a release build on a real Windows runner
-  (GitHub Actions) for every push to `main`/`test` and every PR; the exe is a 7-day workflow artifact.
+- **CI:** `.github/workflows/ci.yml` runs `cargo test` + the Tauri release build (`npx tauri build
+  --no-bundle`, same as release.sh) on a real Windows runner for every push to `main` and every PR
+  (docs-only commits skipped); the exe is a 7-day workflow artifact.
   Check it with `gh run list` / `gh run view --log-failed` after pushing.
 - `release.sh` bumps `Cargo.toml` and `tauri.conf.json`, builds
   `src-tauri/target/x86_64-pc-windows-msvc/release/clipper.exe`, commits "Release X.Y.Z", moves
   branch `test` to HEAD, pushes `main` and `test`, then runs
-  `gh release create vX.Y.Z clipper.exe --prerelease`. Add `--stable` to make it the latest release.
+  `gh release create vX.Y.Z clipper.exe --prerelease`. `X.Y.0` versions are published as the latest (stable) release.
 - **What's new:** every user-facing change gets a short line in `CHANGELOG.md` under `## X.Y.Z`
   (written for players, in English) in the same commit. The exe embeds it and shows the entries
   since the last seen version after an update (`changelog.rs`, `whats_new`); a unit test fails
   when the current version has no entry.
+- **Version rule (owner, 2026-11-06): `X.Y.0` is a stable release, every `X.Y.N` with N > 0 is a
+  test build (pre-release).** `release.sh` picks stable/pre-release from the version itself (no
+  `--stable` flag any more) and `promote.sh` only accepts `X.Y.0`. Fixes go out as the next patch
+  number (test build); a new stable is the next minor `X.(Y+1).0`.
 - **Stable vs test builds:** new installs have "Include test builds" off (since 0.4.0) and only get
-  GitHub's *latest* (non-pre-)release; the owner has it on. Ship a test build first, and once the owner
-  has tested it, promote it: `scripts/promote.sh X.Y.Z` (marks it latest and sets the release notes
-  to the CHANGELOG entries since the previous stable release).
+  GitHub's *latest* (non-pre-)release; the owner has it on. Ship test builds (`X.Y.N`) first; once the owner
+  is happy, release the next `X.Y.0` as stable. `scripts/promote.sh X.Y.0` turns an `X.Y.0` that was
+  published as a pre-release into the latest release (notes = CHANGELOG entries since the previous stable).
 - The updater accepts any release tagged `vX.Y.Z` that is newer than the running version and has
   an asset named exactly `clipper.exe`. It checks the sha256 digest from the GitHub API.
 - No NSIS/MSI: the exe installs itself (`installer.rs`).

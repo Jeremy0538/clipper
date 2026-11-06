@@ -150,11 +150,8 @@ impl UserSettings {
 mod tests {
     use super::*;
 
-    fn dir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("clipper-settings-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn dir(name: &str) -> crate::testutil::TempDir {
+        crate::testutil::TempDir::new(&format!("settings-{name}"))
     }
 
     #[test]
@@ -167,7 +164,6 @@ mod tests {
         assert_eq!(s.screenshot_hotkey.code, "F10");
         assert!(s.sound && s.toast && !s.test_builds && !s.setup_done);
         assert_eq!(s.audio, AudioSettings::default());
-        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -181,7 +177,6 @@ mod tests {
         assert_eq!(s.audio.mic_volume, 0.5);
         assert!(s.audio.discord_enabled); // missing → default
         assert_eq!(s.quality, "balanced");
-        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -192,7 +187,6 @@ mod tests {
         let s = UserSettings::load(&f);
         assert_eq!(s.buffer_secs, 120);
         assert_eq!(std::fs::read_to_string(d.join("settings.broken.json")).unwrap(), "{ not json");
-        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -205,7 +199,6 @@ mod tests {
         assert_eq!(s.hotkey.code, "F8");
         std::fs::write(&f, r#"{"buffer_secs": 1}"#).unwrap();
         assert_eq!(UserSettings::load(&f).buffer_secs, MIN_BUFFER_SECS);
-        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
@@ -224,6 +217,5 @@ mod tests {
         assert_eq!(back.clips_dir, r"D:\Clips");
         assert_eq!(back.audio, s.audio);
         assert!(!d.join("settings.json.tmp").exists());
-        let _ = std::fs::remove_dir_all(d);
     }
 }

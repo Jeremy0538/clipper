@@ -283,11 +283,8 @@ mod tests {
     use super::*;
     use crate::{games::AppRef, settings::GameAudioMode};
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("clipper-obscfg-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(name: &str) -> crate::testutil::TempDir {
+        crate::testutil::TempDir::new(&format!("obscfg-{name}"))
     }
 
     fn ini_value(text: &str, key: &str) -> String {
@@ -334,9 +331,12 @@ mod tests {
         assert_eq!(scene["current_scene"], SCENE);
         assert!(c.join(MONO_SCRIPT).exists());
 
-        // A second start (existing files) must succeed as well.
+        // A second start (existing files) must succeed as well, without
+        // registering the mono script twice.
         write_all(&paths, &s, &incoming, "pw123").unwrap();
-        let _ = fs::remove_dir_all(d);
+        let scene: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(c.join("basic/scenes").join(format!("{COLLECTION}.json"))).unwrap()).unwrap();
+        assert_eq!(scene["modules"]["scripts-tool"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -371,6 +371,5 @@ mod tests {
         assert_eq!(ws_password(&d).unwrap(), a);
         fs::write(d.join("obs-ws-password"), "short").unwrap(); // too weak → replaced
         assert_ne!(ws_password(&d).unwrap(), "short");
-        let _ = fs::remove_dir_all(d);
     }
 }
