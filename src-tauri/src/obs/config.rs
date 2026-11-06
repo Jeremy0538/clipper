@@ -277,3 +277,100 @@ fn register_script(collection: &Path, script: &Path) -> Result<()> {
     fs::write(collection, serde_json::to_string_pretty(&doc)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{games::AppRef, settings::GameAudioMode};
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("clipper-obscfg-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn ini_value(text: &str, key: &str) -> String {
+        text.lines().find_map(|l| l.strip_prefix(&format!("{key}="))).unwrap_or_else(|| panic!("no {key}")).to_string()
+    }
+
+    #[test]
+    fn writes_a_complete_profile() {
+        let d = tmp("write");
+        let paths = ObsPaths::resolve(&d);
+        let mut s = Settings { buffer_secs: 90, width: 2560, height: 1440, fps: 144, force_cpu: true, ..Default::default() };
+        s.audio.apps = vec![AppRef { name: "Spotify".into(), exe: "Spotify.exe".into(), window: String::new() }];
+        let incoming = d.join("clips").join(".incoming");
+        write_all(&paths, &s, &incoming, "pw123").unwrap();
+
+        let c = &paths.config;
+        let user = fs::read_to_string(c.join("user.ini")).unwrap();
+        assert_eq!(ini_value(&user, "FirstRun"), "true");
+        assert_eq!(ini_value(&user, "Profile"), PROFILE);
+
+        let basic = fs::read_to_string(c.join("basic/profiles").join(PROFILE).join("basic.ini")).unwrap();
+        assert_eq!(ini_value(&basic, "RecRBTime"), "90");
+        assert_eq!(ini_value(&basic, "BaseCX"), "2560");
+        assert_eq!(ini_value(&basic, "OutputCY"), "1440");
+        assert_eq!(ini_value(&basic, "FPSCommon"), "144");
+        assert_eq!(ini_value(&basic, "RecEncoder"), "obs_x264");
+        assert_eq!(ini_value(&basic, "RecTracks"), "31"); // tracks 1-4 + one app
+        let rec = ini_value(&basic, "RecFilePath");
+        assert!(!rec.contains('\\') && rec.ends_with("clips/.incoming"), "{rec}");
+
+        let ws: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(c.join("plugin_config/obs-websocket/config.json")).unwrap()).unwrap();
+        assert_eq!(ws["server_password"], "pw123");
+        assert_eq!(ws["server_port"], WS_PORT);
+        assert_eq!(ws["auth_required"], true);
+
+        let enc: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(c.join("basic/profiles").join(PROFILE).join("recordEncoder.json")).unwrap()).unwrap();
+        assert_eq!(enc["rate_control"], "CRF");
+        assert_eq!(enc["keyint_sec"], 1);
+
+        let scene: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(c.join("basic/scenes").join(format!("{COLLECTION}.json"))).unwrap()).unwrap();
+        assert_eq!(scene["current_scene"], SCENE);
+        assert!(c.join(MONO_SCRIPT).exists());
+
+        // A second start (existing files) must succeed as well.
+        write_all(&paths, &s, &incoming, "pw123").unwrap();
+        let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn encoder_levels() {
+        let cpu = |q: &str| encoder_settings(&Settings { quality: q.into(), force_cpu: true, ..Default::default() });
+        assert_eq!(cpu("high")["crf"], 18);
+        assert_eq!(cpu("balanced")["crf"], 22);
+        assert_eq!(cpu("small")["crf"], 26);
+        assert_eq!(cpu("whatever")["crf"], 22);
+    }
+
+    #[test]
+    fn track_mask_follows_the_apps() {
+        use crate::obs::setup::{track_mask, track_names};
+        let mut a = crate::settings::AudioSettings::default();
+        assert_eq!(track_mask(&a), 0b1111);
+        let app = |n: &str| AppRef { name: n.into(), exe: format!("{n}.exe"), window: String::new() };
+        a.apps = vec![app("A"), app("B"), app("C")]; // only two extra tracks exist
+        assert_eq!(track_mask(&a), 0b11_1111);
+        a.game_mode = GameAudioMode::Desktop;
+        let names = track_names(&a);
+        assert_eq!(names[1].1, "Desktop");
+        assert_eq!(names.len(), 6);
+        assert_eq!(names[5], (6, "B".to_string()));
+    }
+
+    #[test]
+    fn ws_password_is_stable() {
+        let d = tmp("pw");
+        let a = ws_password(&d).unwrap();
+        assert_eq!(a.len(), 24);
+        assert_eq!(ws_password(&d).unwrap(), a);
+        fs::write(d.join("obs-ws-password"), "short").unwrap(); // too weak → replaced
+        assert_ne!(ws_password(&d).unwrap(), "short");
+        let _ = fs::remove_dir_all(d);
+    }
+}

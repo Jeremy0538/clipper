@@ -46,8 +46,16 @@ pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
         bail!("Update server not reachable (the release page is not public)");
     }
     let body: serde_json::Value = serde_json::from_slice(&resp.error_for_status()?.bytes().await?)?;
+    let found = pick_release(body, &current(), include_test_builds);
+    *FOUND.lock().unwrap() = found.clone();
+    Ok(found)
+}
+
+/// The newest usable release in a GitHub API answer (one release object or a
+/// list) that is newer than `mine`. Drafts never count, pre-releases only for
+/// testers, and a release needs a `clipper.exe` asset with a sha256 digest.
+fn pick_release(body: serde_json::Value, mine: &semver::Version, include_test_builds: bool) -> Option<Update> {
     let releases = if body.is_array() { body } else { serde_json::Value::Array(vec![body]) };
-    let mine = current();
     let mut best: Option<(semver::Version, Update)> = None;
     for r in releases.as_array().into_iter().flatten() {
         if r["draft"].as_bool() == Some(true)
@@ -57,7 +65,7 @@ pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
         }
         let Some(v) = r["tag_name"].as_str().and_then(|t| semver::Version::parse(t.trim_start_matches('v')).ok())
         else { continue };
-        if v <= mine || best.as_ref().is_some_and(|(b, _)| &v <= b) {
+        if &v <= mine || best.as_ref().is_some_and(|(b, _)| &v <= b) {
             continue;
         }
         let Some(asset) = r["assets"].as_array().into_iter().flatten().find(|a| a["name"] == ASSET) else { continue };
@@ -70,9 +78,7 @@ pub async fn check(include_test_builds: bool) -> Result<Option<Update>> {
             sha256: sha.to_lowercase(),
         }));
     }
-    let found = best.map(|(_, u)| u);
-    *FOUND.lock().unwrap() = found.clone();
-    Ok(found)
+    best.map(|(_, u)| u)
 }
 
 /// The update the last check found, straight from GitHub. Installing only ever
@@ -139,4 +145,62 @@ pub fn wait_for_previous() {
     }
     // Give its OBS a moment to release the websocket port.
     std::thread::sleep(std::time::Duration::from_secs(2));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn release(tag: &str, prerelease: bool) -> serde_json::Value {
+        json!({
+            "tag_name": tag, "draft": false, "prerelease": prerelease, "body": format!("notes {tag}"),
+            "assets": [{ "name": "clipper.exe", "browser_download_url": format!("https://x/{tag}/clipper.exe"),
+                         "digest": "sha256:ABCDEF" }],
+        })
+    }
+    fn v(s: &str) -> semver::Version { semver::Version::parse(s).unwrap() }
+
+    #[test]
+    fn picks_the_newest_newer_release() {
+        let list = json!([release("v0.4.0", false), release("v0.5.1", true), release("v0.5.0", false), release("v0.3.0", false)]);
+        let u = pick_release(list.clone(), &v("0.4.0"), true).unwrap();
+        assert_eq!(u.version, "0.5.1");
+        assert_eq!(u.url, "https://x/v0.5.1/clipper.exe");
+        assert_eq!(u.sha256, "abcdef");
+        assert_eq!(u.notes, "notes v0.5.1");
+        // Stable users skip the pre-release.
+        assert_eq!(pick_release(list, &v("0.4.0"), false).unwrap().version, "0.5.0");
+    }
+
+    #[test]
+    fn nothing_when_up_to_date() {
+        let list = json!([release("v0.4.0", false), release("v0.3.9", false)]);
+        assert!(pick_release(list, &v("0.4.0"), true).is_none());
+    }
+
+    #[test]
+    fn single_latest_object_works() {
+        assert_eq!(pick_release(release("v1.0.0", false), &v("0.4.0"), false).unwrap().version, "1.0.0");
+    }
+
+    #[test]
+    fn skips_unusable_releases() {
+        let mut draft = release("v0.9.0", false);
+        draft["draft"] = json!(true);
+        let mut no_exe = release("v0.8.0", false);
+        no_exe["assets"][0]["name"] = json!("clipper.zip");
+        let mut no_digest = release("v0.7.0", false);
+        no_digest["assets"][0].as_object_mut().unwrap().remove("digest");
+        let mut md5 = release("v0.6.5", false);
+        md5["assets"][0]["digest"] = json!("md5:123");
+        let bad_tag = release("latest", false);
+        let list = json!([draft, no_exe, no_digest, md5, bad_tag, release("v0.6.0", false)]);
+        assert_eq!(pick_release(list, &v("0.4.0"), true).unwrap().version, "0.6.0");
+    }
+
+    #[test]
+    fn crate_version_parses() {
+        let _ = current();
+    }
 }

@@ -34,6 +34,11 @@ fn sha_b64(s: &str) -> String {
     B64.encode(Sha256::digest(s.as_bytes()))
 }
 
+/// obs-websocket v5 login: base64(sha256(base64(sha256(password + salt)) + challenge)).
+fn auth_response(password: &str, salt: &str, challenge: &str) -> String {
+    sha_b64(&format!("{}{challenge}", sha_b64(&format!("{password}{salt}"))))
+}
+
 impl ObsClient {
     pub fn new() -> Self {
         Self {
@@ -76,8 +81,7 @@ impl ObsClient {
         if let Some(auth) = hello["d"].get("authentication") {
             let salt = auth["salt"].as_str().unwrap_or_default();
             let challenge = auth["challenge"].as_str().unwrap_or_default();
-            let secret = sha_b64(&format!("{password}{salt}"));
-            identify["authentication"] = sha_b64(&format!("{secret}{challenge}")).into();
+            identify["authentication"] = auth_response(password, salt, challenge).into();
         }
         sink.send(Message::Text(json!({ "op": 1, "d": identify }).to_string().into()))
             .await?;
@@ -171,5 +175,18 @@ where
             Some(Err(e)) => return Err(e.into()),
             None => bail!("socket closed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn auth_matches_the_protocol() {
+        // Reference value computed independently (Python hashlib/base64).
+        assert_eq!(
+            super::auth_response("supersecret", "lM1GncleQOaCu9lT1yeUZhFYnqhsLLP1G5lAGo3ixaI=",
+                                 "+IxH4CnCiqpX1rM9scsNynZzbOe4KhDeYcTNS3PDaeY="),
+            "sQBlPUYd9mki/3XVFBp4Pt08FCMWdMVIqnFWdEitUME="
+        );
     }
 }

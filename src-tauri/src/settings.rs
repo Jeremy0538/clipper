@@ -145,3 +145,85 @@ impl UserSettings {
         std::fs::rename(&tmp, file)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("clipper-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn first_start_gives_defaults() {
+        let d = dir("first");
+        let s = UserSettings::load(&d.join("settings.json"));
+        assert_eq!(s.buffer_secs, 120);
+        assert_eq!(s.hotkey.code, "F8");
+        assert_eq!(s.record_hotkey.code, "F9");
+        assert_eq!(s.screenshot_hotkey.code, "F10");
+        assert!(s.sound && s.toast && !s.test_builds && !s.setup_done);
+        assert_eq!(s.audio, AudioSettings::default());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn old_partial_file_keeps_its_values_and_fills_the_rest() {
+        let d = dir("partial");
+        let f = d.join("settings.json");
+        std::fs::write(&f, r#"{"buffer_secs": 60, "theme": "dark", "audio": {"mic_volume": 0.5}}"#).unwrap();
+        let s = UserSettings::load(&f);
+        assert_eq!(s.buffer_secs, 60);
+        assert_eq!(s.theme, "dark");
+        assert_eq!(s.audio.mic_volume, 0.5);
+        assert!(s.audio.discord_enabled); // missing → default
+        assert_eq!(s.quality, "balanced");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn broken_file_is_kept_aside_and_defaults_are_used() {
+        let d = dir("broken");
+        let f = d.join("settings.json");
+        std::fs::write(&f, "{ not json").unwrap();
+        let s = UserSettings::load(&f);
+        assert_eq!(s.buffer_secs, 120);
+        assert_eq!(std::fs::read_to_string(d.join("settings.broken.json")).unwrap(), "{ not json");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn out_of_range_values_are_repaired() {
+        let d = dir("repair");
+        let f = d.join("settings.json");
+        std::fs::write(&f, r#"{"buffer_secs": 99999, "hotkey": {"code": "NoSuchKey"}}"#).unwrap();
+        let s = UserSettings::load(&f);
+        assert_eq!(s.buffer_secs, MAX_BUFFER_SECS);
+        assert_eq!(s.hotkey.code, "F8");
+        std::fs::write(&f, r#"{"buffer_secs": 1}"#).unwrap();
+        assert_eq!(UserSettings::load(&f).buffer_secs, MIN_BUFFER_SECS);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_without_leftovers() {
+        let d = dir("roundtrip");
+        let f = d.join("settings.json");
+        let mut s = UserSettings::default();
+        s.buffer_secs = 45;
+        s.clips_dir = r"D:\Clips".into();
+        s.audio.game_mode = GameAudioMode::Desktop;
+        s.audio.mic_boost_db = 12.0;
+        s.save(&f).unwrap();
+        s.save(&f).unwrap(); // overwriting an existing file works too
+        let back = UserSettings::load(&f);
+        assert_eq!(back.buffer_secs, 45);
+        assert_eq!(back.clips_dir, r"D:\Clips");
+        assert_eq!(back.audio, s.audio);
+        assert!(!d.join("settings.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

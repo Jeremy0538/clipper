@@ -457,3 +457,31 @@ mod server_tests {
         assert!(!super::is_minecraft_server("javaw net.minecraft.client.main.Main --version 1.21"));
     }
 }
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn names() {
+        assert_eq!(norm(r"D:\SteamLibrary\steamapps\Common\Game"), "d:/steamlibrary/steamapps/common/game");
+        assert_eq!(pretty_name("spotify.exe"), "Spotify");
+        assert_eq!(pretty_name("Discord.EXE"), "Discord");
+        assert_eq!(pretty_name(""), "");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn real_game_beats_added_app() {
+        let g = pick(vec![("Discord".into(), 1, true), ("Elden Ring".into(), 2, false)]).unwrap();
+        assert_eq!(g.name, "Elden Ring");
+        assert!(pick(vec![]).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn obs_window_string_escapes() {
+        let w = win::Win { title: "A:B #1".into(), class: "Cls".into(), exe: "g.exe".into(), area: 1 };
+        assert_eq!(w.obs_string(), "A#3AB #221:Cls:g.exe");
+    }
+}
