@@ -80,8 +80,10 @@ $("player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !listening) closePlayer(); });
 $("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
 
-// ---- select clips: combine (order = click order) or delete ----
+// ---- select clips: combine (order = oldest first) or delete ----
 let selecting = false, selected = [];
+const clipTime = new Map(); // path -> recorded (s): edits keep the original's time
+const byAge = (a, b) => (clipTime.get(a) ?? 0) - (clipTime.get(b) ?? 0) || a.localeCompare(b);
 const isImage = (path) => /\.(png|jpe?g)$/i.test(path);
 function disarmDelete() {
   const d = $("sel-delete");
@@ -89,6 +91,7 @@ function disarmDelete() {
   d.textContent = selected.length ? `Delete ${selected.length}` : "Delete";
 }
 function syncSelection() {
+  selected.sort(byAge);
   document.body.classList.toggle("selecting", selecting);
   $("sel-mode").textContent = selecting ? "Done" : "Select";
   for (const id of ["sel-info", "sel-clear", "sel-all"]) $(id).classList.toggle("hidden", !selecting);
@@ -211,8 +214,11 @@ function clipCard(c) {
       .then(() => { c.favorite = on; say(on ? "Starred: the storage limit never deletes it." : "Star removed."); loadClips(); },
         (err) => { star.classList.toggle("on", !on); say(err); }); // not stored: don't show it as starred
   };
-  el.querySelector(".sub").textContent =
-    `${new Date(c.modified * 1000).toLocaleString()} · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
+  const when = (t) => new Date(t * 1000).toLocaleString();
+  const sub = el.querySelector(".sub");
+  sub.textContent = (c.edited ? `Edited ${when(c.modified)}` : when(c.modified))
+    + ` · ${(c.size / 1e6).toFixed(c.size < 1e7 ? 1 : 0)} MB`;
+  sub.title = c.edited ? `Recorded ${when(c.recorded)}\nEdited ${when(c.modified)}` : `Recorded ${when(c.modified)}`;
   el.dataset.path = c.path;
   el.querySelector(".thumb").onclick = () => {
     if (selecting) {
@@ -315,7 +321,7 @@ const STARRED = "\u0000starred";   // filter value for "only starred clips"
 // Cards are reused while their clip is unchanged: rebuilding every card (and
 // its <video> thumbnail) on each star, rename or saved clip was slow with many clips.
 const cardCache = new Map();
-const cardKey = (c) => [c.path, c.name, c.modified, c.size, !!c.favorite, c.folder].join("\u0001");
+const cardKey = (c) => [c.path, c.name, c.modified, c.recorded, c.edited, c.size, !!c.favorite, c.folder].join("\u0001");
 // One load at a time; calls during a load ask for one more run afterwards, so
 // an older answer can never be drawn over a newer one.
 let clipsLoading = null, clipsAgain = false;
@@ -329,6 +335,8 @@ function loadClips() {
 }
 async function loadClipsNow() {
   const all = await invoke("list_clips");
+  clipTime.clear();
+  for (const c of all) clipTime.set(c.path, c.recorded ?? c.modified);
   const folders = [...new Set(all.map((c) => c.folder).filter(Boolean))].sort((a, b) => a.localeCompare(b));
   const anyStar = all.some((c) => c.favorite);
   if (folderFilter === STARRED ? !anyStar : folderFilter && !folders.includes(folderFilter)) folderFilter = "";

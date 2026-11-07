@@ -292,6 +292,7 @@ fn rename_clip(state: tauri::State<'_, AppState>, path: String, name: String) ->
     let new = clips::rename(&p, &name)?;
     let favs = clips::Favorites::new(&state.obs.data_dir);
     favs.moved(&old_key, &new.to_string_lossy());
+    clips::Recorded::new(&state.obs.data_dir).moved_many(&[(old_key, new.clone())]);
     clog!("renamed {} → {}", p.display(), new.display());
     Ok(new.to_string_lossy().into_owned())
 }
@@ -1071,8 +1072,9 @@ async fn move_clips_now(app: &AppHandle, from: &std::path::Path, to: &std::path:
     let st = app.state::<AppState>();
     let _ = app.emit("clips-moving", true);
     let favs = clips::Favorites::new(&st.obs.data_dir);
+    let rec = clips::Recorded::new(&st.obs.data_dir);
     let (o, n) = (from.to_path_buf(), to.to_path_buf());
-    let r = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs)).await.map_err(|e| e.to_string());
+    let r = tauri::async_runtime::spawn_blocking(move || clips::move_all(&o, &n, &favs, &rec)).await.map_err(|e| e.to_string());
     let _ = app.emit("clips-moving", false);
     r
 }
@@ -1130,6 +1132,8 @@ async fn editor_export(app: AppHandle, request: editor::ExportRequest) -> Result
     let out = editor::export(&tools, &folder, &info, &request, move |p| { let _ = h.emit("export-progress", p); })
         .await
         .map_err(|e| { clog!("ERROR editor export: {e:#}"); format!("{e:#}") })?;
+    let rec = clips::Recorded::new(&st.obs.data_dir);
+    rec.set(&out, rec.of(std::path::Path::new(&info.path)));
     clog!("editor: saved {}", out.display());
     let _ = app.emit("clip-saved", out.to_string_lossy());
     after_new_file(&app).await;
@@ -1145,6 +1149,8 @@ async fn editor_frame(app: AppHandle, time: f64) -> Result<String, String> {
     let out = editor::save_frame(&tools, &info, time)
         .await
         .map_err(|e| { clog!("ERROR editor frame: {e:#}"); format!("{e:#}") })?;
+    let rec = clips::Recorded::new(&st.obs.data_dir);
+    rec.set(&out, rec.of(std::path::Path::new(&info.path)));
     clog!("editor: saved frame {}", out.display());
     // A small PNG: no storage-limit run (it could delete the clip being edited).
     let _ = app.emit("clip-saved", out.to_string_lossy());
@@ -1195,6 +1201,9 @@ async fn combine_clips(app: AppHandle, paths: Vec<String>) -> Result<String, Str
     let out = editor::combine(&tools, &dir, &ps, move |p| { let _ = h.emit("combine-progress", p); })
         .await
         .map_err(|e| { clog!("ERROR combine: {e:#}"); format!("{e:#}") })?;
+    let rec = clips::Recorded::new(&st.obs.data_dir);
+    // Footage starts with the oldest clip.
+    if let Some(t) = ps.iter().map(|p| rec.of(p)).min() { rec.set(&out, t); }
     clog!("combined: {}", out.display());
     notify::toast(&app, true, "Clips combined", out.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
     let _ = app.emit("clip-saved", out.to_string_lossy());
@@ -1218,6 +1227,7 @@ fn list_clips(state: tauri::State<'_, AppState>) -> Vec<clips::ClipInfo> {
     for c in &mut v {
         c.favorite = clips::Favorites::has(&favs, &c.path);
     }
+    clips::Recorded::new(&state.obs.data_dir).apply(&mut v);
     v
 }
 

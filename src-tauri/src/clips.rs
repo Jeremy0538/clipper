@@ -21,6 +21,12 @@ pub struct ClipInfo {
     pub kind: String,
     /// Starred: kept by the storage limit.
     pub favorite: bool,
+    /// When the footage was recorded (seconds since epoch). Equals `modified`
+    /// for an original clip; for an edit/combine/frame it is the original's
+    /// time, kept in <data>/recorded.json, and `modified` is when it was edited.
+    pub recorded: u64,
+    /// Made in Clipper's editor (or by combining): `modified` is the edit date.
+    pub edited: bool,
 }
 
 /// Characters Windows forbids in file names.
@@ -158,7 +164,7 @@ fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Move everything in the clips folder (files and game folders, not ".…"
 /// folders) into `to`, keeping stars. Existing names get " (2)". Returns
 /// (moved, failed).
-pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
+pub fn move_all(from: &Path, to: &Path, favs: &Favorites, rec: &Recorded) -> (usize, usize) {
     let (mut moved, mut failed) = (0, 0);
     let mut renamed: Vec<(String, PathBuf)> = vec![];
     if !is_ours(from) {
@@ -202,6 +208,7 @@ pub fn move_all(from: &Path, to: &Path, favs: &Favorites) -> (usize, usize) {
         }
     }
     favs.moved_many(&renamed); // one read and one write, not one per clip
+    rec.moved_many(&renamed);
     (moved, failed)
 }
 
@@ -231,6 +238,8 @@ fn videos_in(dir: &Path, folder: &str) -> Vec<ClipInfo> {
                 folder: folder.to_string(),
                 kind: kind.to_string(),
                 favorite: false,
+                recorded: 0,
+                edited: false,
             })
         })
         .collect()
@@ -511,6 +520,70 @@ impl Favorites {
     }
 }
 
+/// Original recording times of edited clips (edits, combined clips, saved
+/// frames), by fav_key, in <data>/recorded.json. Originals aren't listed:
+/// their own file time is the recording time.
+pub struct Recorded(PathBuf);
+
+static REC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl Recorded {
+    pub fn new(data_dir: &Path) -> Self {
+        Self(data_dir.join("recorded.json"))
+    }
+    pub fn load(&self) -> std::collections::HashMap<String, u64> {
+        fs::read_to_string(&self.0).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+    fn save(&self, m: &std::collections::HashMap<String, u64>) {
+        let tmp = self.0.with_extension("json.tmp");
+        if fs::write(&tmp, serde_json::to_string(m).unwrap_or_default()).is_ok() {
+            let _ = fs::rename(&tmp, &self.0);
+        }
+    }
+    /// Recording time of an existing clip: stored for edits, else its file time.
+    pub fn of(&self, path: &Path) -> u64 {
+        let key = fav_key(&path.to_string_lossy());
+        self.load().get(&key).copied().unwrap_or_else(|| {
+            fs::metadata(path).and_then(|m| m.modified()).ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
+        })
+    }
+    /// A new file made from footage recorded at `when`.
+    pub fn set(&self, path: &Path, when: u64) {
+        let _g = REC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.load();
+        // Drop entries of files that are gone (deleted clips).
+        m.retain(|k, _| Path::new(k).exists());
+        m.insert(fav_key(&path.to_string_lossy()), when);
+        self.save(&m);
+    }
+    /// After moving files: (fav_key of the old path, new path).
+    pub fn moved_many(&self, moves: &[(String, PathBuf)]) {
+        let _g = REC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self.load();
+        let mut changed = false;
+        for (from_key, to) in moves {
+            if let Some(t) = m.remove(from_key) {
+                m.insert(fav_key(&to.to_string_lossy()), t);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(&m);
+        }
+    }
+    /// Fill `recorded`/`edited` of listed clips.
+    pub fn apply(&self, clips: &mut [ClipInfo]) {
+        let m = self.load();
+        for c in clips {
+            match m.get(&fav_key(&c.path)) {
+                Some(&t) => { c.recorded = t; c.edited = true; }
+                None => c.recorded = c.modified,
+            }
+        }
+    }
+}
+
 /// Storage limit: delete the oldest clips (never starred ones) until
 /// Clipper's folders together are under `limit_gb`. Returns how many were deleted.
 pub fn enforce_limit(dirs: &[PathBuf], limit_gb: f64, favorites: &[String]) -> usize {
@@ -608,9 +681,9 @@ mod move_tests {
         std::fs::write(from.join(".incoming/busy.mp4"), "3").unwrap();
         let favs = super::Favorites::new(&data);
         favs.set(&from.join("Game/x.mp4").to_string_lossy(), true).unwrap();
-        assert_eq!(super::move_all(&from, &to, &favs), (0, 0), "not marked: not ours");
+        assert_eq!(super::move_all(&from, &to, &favs, &super::Recorded::new(&data)), (0, 0), "not marked: not ours");
         super::mark(&from).unwrap();
-        assert_eq!(super::move_all(&from, &to, &favs), (2, 0));
+        assert_eq!(super::move_all(&from, &to, &favs, &super::Recorded::new(&data)), (2, 0));
         assert_eq!(std::fs::read_to_string(to.join("Game/x (2).mp4")).unwrap(), "1");
         assert!(to.join("y.png").exists() && !from.join("Game").exists());
         assert!(from.join(".incoming/busy.mp4").exists());
