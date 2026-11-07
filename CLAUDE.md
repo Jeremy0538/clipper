@@ -22,9 +22,9 @@ UI text and commit messages in English.
 - Logs on Windows: `%APPDATA%\nl.jeremyklootwijk.clipper\clipper.log`
   (Settings → Troubleshooting → Open log folder). OBS logs are in `obs\config\obs-studio\logs\`
   in the same folder. Ask for the relevant lines when a bug report is vague.
-- Bug reports and test checklists live in the owner's **Todoist Inbox** (in Dutch). If you have
-  Todoist, read the whole Inbox for new reports, not only the ones you already know. After a
-  release, add a short Dutch test checklist (a parent task with numbered subtasks) for what changed.
+- Bug reports live in the owner's **Todoist Inbox** (in Dutch). If you have Todoist, read the
+  whole Inbox for new reports, not only the ones you already know. Do not add test checklists to
+  Todoist after a release (owner, 2026-11-07); the release notes list what to test.
 - Keep a release small enough to test in one sitting, and list the testable points in the
   release notes.
 - Never put secrets in this repo. It is **public**, because the updater downloads from public
