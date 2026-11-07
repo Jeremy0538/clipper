@@ -4,6 +4,9 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.5.2
+- Editor: the start and end handles on the timeline are much easier to grab and drag, and no longer jump to the cursor when you grab them.
+
 ## 0.5.1
 - Fixed: after turning "Include test builds" off, a test build that an earlier check had found could still be installed.
 - Apps whose program name ends in a mixed-case ".Exe" no longer show the extension in the app list and track names.

@@ -235,17 +235,32 @@ function timeAt(ev) {
   const r = $("ed-timeline").getBoundingClientRect();
   return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * ed.info.duration;
 }
-let dragging = null;
+let dragging = null, grabOffset = 0;
+// Grab the nearest handle when the press lands within GRAB_PX of it (the visible
+// bar is only 6px wide), and keep the offset so the handle doesn't jump to the cursor.
+const GRAB_PX = 14;
+function handleNear(ev) {
+  const r = $("ed-timeline").getBoundingClientRect(), d = ed.info.duration;
+  const px = (t) => r.left + (t / d) * r.width;
+  const ds = Math.abs(ev.clientX - px(ed.start)), de = Math.abs(ev.clientX - px(ed.end));
+  // Handles on top of each other: pick by side so both can still be pulled apart.
+  if (ds <= GRAB_PX && de <= GRAB_PX && ds === de) return ev.clientX < px(ed.start) ? "start" : "end";
+  if (Math.min(ds, de) > GRAB_PX) return null;
+  return ds <= de ? "start" : "end";
+}
 $("ed-timeline").onpointerdown = (ev) => {
-  if (!ed.info) return;
-  dragging = ev.target.id === "ed-h-start" ? "start" : ev.target.id === "ed-h-end" ? "end" : "seek";
+  if (!ed.info || ev.button !== 0) return;
+  dragging = handleNear(ev) || "seek";
+  grabOffset = dragging === "seek" ? 0 : timeAt(ev) - ed[dragging];
   ed.dragFrom = dragging !== "seek" ? snapshot() : null;
   $("ed-timeline").setPointerCapture(ev.pointerId);
-  $("ed-timeline").onpointermove(ev);
+  ev.preventDefault();
+  if (dragging === "seek") $("ed-timeline").onpointermove(ev);
 };
 $("ed-timeline").onpointermove = (ev) => {
-  if (!dragging) return;
-  const t = timeAt(ev);
+  if (!ed.info) return;
+  if (!dragging) { $("ed-timeline").style.cursor = handleNear(ev) ? "ew-resize" : ""; return; }
+  const t = Math.max(0, Math.min(ed.info.duration, timeAt(ev) - grabOffset));
   if (dragging === "start") { ed.start = Math.min(t, ed.end - 0.5); preview(ed.start); }
   else if (dragging === "end") { ed.end = Math.max(t, ed.start + 0.5); preview(ed.end); }
   else preview(Math.max(ed.start, Math.min(t, ed.end)));
