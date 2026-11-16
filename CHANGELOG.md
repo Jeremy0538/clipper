@@ -4,6 +4,9 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.5.5
+- Editor: ◀ and ▶ next to the clip name (or Ctrl+← / Ctrl+→) go to the previous or next clip in time, within the folder you picked. With unsaved changes, press twice.
+
 ## 0.5.4
 - Clicking a clip now opens it straight in the editor, which plays it right away. The separate video pop-up and the Edit button are gone. Esc goes back to your clips.
 

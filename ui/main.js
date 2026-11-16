@@ -317,6 +317,7 @@ function loadClips() {
   });
   return clipsLoading;
 }
+let shownClips = [];   // the clips under the current filter (the editor's ◀ ▶ walks these)
 async function loadClipsNow() {
   const all = await invoke("list_clips");
   clipTime.clear();
@@ -335,6 +336,7 @@ async function loadClipsNow() {
   $("folders").classList.toggle("hidden", chips.length < 3 && !anyStar);
   const clips = folderFilter === STARRED ? all.filter((c) => c.favorite)
     : folderFilter ? all.filter((c) => c.folder === folderFilter) : all;
+  shownClips = clips;
   const fresh = new Map();
   const cards = clips.map((c) => {
     const k = cardKey(c);

@@ -28,7 +28,7 @@ a fixed SHA-256 hash.
   and **Share ▾** to copy a clip for Discord (20 MB, Nitro Basic 50 MB, Nitro 1 GB or the original),
   then paste it in Discord with Ctrl+V.
 - **Click a clip** to play it in the editor: trim, cut out parts and change the volume of Game,
-  Discord and Mic separately.
+  Discord and Mic separately. ◀ ▶ (Ctrl+← / Ctrl+→) go to the previous or next clip.
 
 Clips are saved in `Videos\Clipper`, one folder per game.
 

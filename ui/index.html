@@ -45,7 +45,10 @@
   <main id="view-editor" class="view hidden">
     <div class="ed-head">
       <button id="ed-back">← Back</button>
-      <span id="ed-title"></span><span class="spacer"></span>
+      <button id="ed-prev" class="small" title="Previous (older) clip (Ctrl+←)">◀</button>
+      <span id="ed-title"></span>
+      <button id="ed-next" class="small" title="Next (newer) clip (Ctrl+→)">▶</button>
+      <span id="ed-pos"></span><span class="spacer"></span>
       <span id="ed-status"></span>
       <label class="ed-check" title="After saving, the original clip goes to the recycle bin"><input type="checkbox" id="ed-replace"> Delete the original</label>
       <button id="ed-export" class="primary">Save as new clip</button>
@@ -76,7 +79,7 @@
       <label class="ed-check"><input type="checkbox" id="ed-fade"> Fade in/out</label>
       <button id="ed-snap" title="Save this frame as a picture (P)">Save frame (P)</button>
       <span class="spacer"></span>
-      <span class="hint">Space play · I/O start/end · S split · Del remove · ,/. frame · ←/→ 1 s (Shift 5 s) · Home/End</span>
+      <span class="hint">Space play · I/O start/end · S split · Del remove · ,/. frame · ←/→ 1 s (Shift 5 s) · Ctrl+←/→ other clip · Home/End</span>
     </div>
     <div id="ed-tracks"></div>
   </main>

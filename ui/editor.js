@@ -56,6 +56,8 @@ async function openEditor(c, autoplay = false) {
   const stale = () => gen !== ed.opening;
   showView("editor");
   $("ed-title").textContent = c.name;
+  syncNav();
+  edv.pause();   // switching clips: stop the old one while the new one loads
   $("ed-status").textContent = "Opening…";
   $("ed-tracks").replaceChildren();
   $("ed-export").disabled = true;
@@ -316,6 +318,7 @@ window.addEventListener("keydown", (e) => {
   const ctrl = e.ctrlKey || e.metaKey, step = e.shiftKey ? 5 : 1;
   if (ctrl && e.code === "KeyZ") { e.preventDefault(); e.shiftKey ? restore(ed.redo, ed.undo) : restore(ed.undo, ed.redo); }
   else if (ctrl && e.code === "KeyY") { e.preventDefault(); restore(ed.redo, ed.undo); }
+  else if (ctrl && (e.code === "ArrowLeft" || e.code === "ArrowRight")) { e.preventDefault(); if (!e.repeat) switchClip(e.code === "ArrowLeft" ? -1 : 1); }
   else if (ctrl) return;
   // Held keys only repeat for moving around, not for actions (P would save dozens of pictures).
   else if (e.repeat && !["ArrowLeft", "ArrowRight", "Comma", "Period"].includes(e.code)) { if (e.code === "Space") e.preventDefault(); return; }
@@ -349,6 +352,40 @@ async function closeEditor() {
   showView("clips");
 }
 $("ed-back").onclick = closeEditor;
+
+// ◀ ▶: the previous/next clip in time (when it was recorded; edits keep the
+// original's time), within the folder filter of the clip list. Images are skipped.
+function navList() {
+  return shownClips.filter((c) => c.kind !== "image").sort((a, b) => byAge(a.path, b.path));
+}
+function neighbour(dir) {
+  const list = navList();
+  const i = list.findIndex((c) => c.path === ed.clip?.path);
+  return { list, i, c: i < 0 ? null : list[i + dir] || null };
+}
+function syncNav() {
+  const { list, i } = neighbour(0);
+  $("ed-prev").disabled = i <= 0;
+  $("ed-next").disabled = i < 0 || i >= list.length - 1;
+  $("ed-pos").textContent = i < 0 ? "" : `${i + 1} / ${list.length}`;
+}
+// Unsaved changes (trim, cuts) are lost on a switch: the first press only warns.
+let navArmed = 0;
+function switchClip(dir) {
+  if (ed.busy) return;
+  const { c } = neighbour(dir);
+  if (!c) return;
+  if (ed.info && ed.undo.length && navArmed !== dir) {
+    navArmed = dir;
+    $("ed-status").textContent = "Unsaved changes: press again to switch clip";
+    setTimeout(() => { if (navArmed === dir) { navArmed = 0; if ($("ed-status").textContent.startsWith("Unsaved")) $("ed-status").textContent = ""; } }, 3000);
+    return;
+  }
+  navArmed = 0;
+  openEditor(c, true);
+}
+$("ed-prev").onclick = () => switchClip(-1);
+$("ed-next").onclick = () => switchClip(1);
 
 // "Delete the original" is remembered on this PC.
 try { $("ed-replace").checked = localStorage.getItem("ed-replace") === "1"; } catch {}
