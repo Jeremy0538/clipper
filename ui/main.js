@@ -63,21 +63,6 @@ const lazy = new IntersectionObserver((entries) => {
   }
 }, { rootMargin: "200px" });
 
-function openPlayer(c) {
-  $("player-title").textContent = c.name;
-  $("player-video").src = convertFileSrc(c.path);
-  $("player").classList.remove("hidden");
-  $("player-video").play().catch(() => {});
-}
-function closePlayer() {
-  $("player-video").pause();
-  $("player-video").removeAttribute("src");
-  $("player-video").load();
-  $("player").classList.add("hidden");
-}
-$("player-close").onclick = closePlayer;
-$("player").onclick = (e) => { if (e.target.id === "player") closePlayer(); };
-window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !listening) closePlayer(); });
 $("open-folder").onclick = () => invoke("open_clips_folder").catch(say);
 
 // ---- select clips: combine (order = oldest first) or delete ----
@@ -119,7 +104,7 @@ $("sel-all").onclick = () => {
   syncSelection();
 };
 // Windows can't move a file to the recycle bin while a <video> still has it
-// open: let go of it everywhere (player, editor, thumbnails) first.
+// open: let go of it everywhere (editor, thumbnails) first.
 function releaseMedia(path) {
   const url = convertFileSrc(path);
   for (const v of document.querySelectorAll("video")) {
@@ -172,11 +157,11 @@ function clipCard(c) {
   const el = document.createElement("div");
   el.className = "clip";
   const isImg = c.kind === "image";
-  el.innerHTML = `<div class="thumb">${isImg ? "<img alt=''>" : "<video muted preload='metadata'></video><span class='dur'></span>"}</div>
+  el.innerHTML = `<div class="thumb" title="${isImg ? "Show in folder" : "Play and edit"}">${isImg ? "<img alt=''>" : "<video muted preload='metadata'></video><span class='dur'></span>"}</div>
     <div class="meta"><div><div class="name" title="Double-click to rename"></div><div class="sub"></div></div>
       <button class="star" title="Star: never deleted by the storage limit">★</button></div>
     <div class="actions"><button data-a="share" class="primary" title="Copy it to paste in Discord (Ctrl+V)">Share ▾</button>
-      ${isImg ? "" : "<button data-a='edit'>Edit</button>"}<button data-a="reveal" title="Show in folder">Folder</button><span class="spacer"></span>
+      <button data-a="reveal" title="Show in folder">Folder</button><span class="spacer"></span>
       <button data-a="delete" class="danger">Delete</button></div>`;
   if (isImg) {
     el.querySelector("img").src = convertFileSrc(c.path);
@@ -226,10 +211,9 @@ function clipCard(c) {
       if (i >= 0) selected.splice(i, 1); else selected.push(c.path);
       return syncSelection();
     }
-    isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openPlayer(c);
+    isImg ? invoke("reveal_clip", { path: c.path }).catch(say) : openEditor(c, true);
   };
   el.querySelector('[data-a="share"]').onclick = (e) => { e.stopPropagation(); openShare(e.currentTarget, c, isImg); };
-  el.querySelector('[data-a="edit"]')?.addEventListener("click", () => openEditor(c));
   el.querySelector('[data-a="reveal"]').onclick = () => invoke("reveal_clip", { path: c.path }).catch(say);
   const del = el.querySelector('[data-a="delete"]');
   del.onclick = async () => {

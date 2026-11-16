@@ -4,6 +4,9 @@ Shown in the app after an update ("What's new"), and used as the notes of a
 stable release (`scripts/promote.sh`). Short, for players: what changed for
 them, not how. Newest version on top; one `## X.Y.Z` heading per version.
 
+## 0.5.4
+- Clicking a clip now opens it straight in the editor, which plays it right away. The separate video pop-up and the Edit button are gone. Esc goes back to your clips.
+
 ## 0.5.3
 - Combine: selected clips are always joined oldest first, whatever order you click them in. Edited clips count by when the original was recorded.
 - Edited clips show when they were edited; hover the date to see when the original was recorded.

@@ -27,7 +27,8 @@ a fixed SHA-256 hash.
 - **Clips**: play, star (starred clips are never removed by the storage limit), rename, combine,
   and **Share ▾** to copy a clip for Discord (20 MB, Nitro Basic 50 MB, Nitro 1 GB or the original),
   then paste it in Discord with Ctrl+V.
-- **Edit**: trim and change the volume of Game, Discord and Mic separately.
+- **Click a clip** to play it in the editor: trim, cut out parts and change the volume of Game,
+  Discord and Mic separately.
 
 Clips are saved in `Videos\Clipper`, one folder per game.
 

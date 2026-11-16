@@ -47,7 +47,8 @@ function showView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + name));
 }
 
-async function openEditor(c) {
+// Clicking a clip opens it here: the editor is also the player (autoplay = start playing once loaded).
+async function openEditor(c, autoplay = false) {
   // Each open gets a number; an older open that is still loading stops as soon
   // as it sees a newer one, so tracks of two clips never get mixed.
   const gen = ++ed.opening;
@@ -94,6 +95,7 @@ async function openEditor(c) {
     uiLog(`editor ready: ${ed.tracks.length} tracks decoded (${ed.tracks.map((t) => `${t.s.name} ${t.buf.duration.toFixed(1)}s`).join(", ")})`);
     $("ed-status").textContent = "";
     $("ed-export").disabled = false;
+    if (autoplay) edv.play().catch(() => {});
   } catch (err) {
     if (stale()) return;   // a newer clip took over; its own open reports its errors
     $("ed-status").textContent = String(err); uiLog("editor open failed: " + err);
@@ -317,6 +319,7 @@ window.addEventListener("keydown", (e) => {
   else if (ctrl) return;
   // Held keys only repeat for moving around, not for actions (P would save dozens of pictures).
   else if (e.repeat && !["ArrowLeft", "ArrowRight", "Comma", "Period"].includes(e.code)) { if (e.code === "Space") e.preventDefault(); return; }
+  else if (e.code === "Escape") { if (!ed.busy && !document.querySelector(".share-menu")) closeEditor(); }
   else if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   else if (e.code === "KeyI") setStart();
   else if (e.code === "KeyO") setEnd();
